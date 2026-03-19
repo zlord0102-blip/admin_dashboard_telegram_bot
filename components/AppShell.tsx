@@ -23,6 +23,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [loading, setLoading] = useState(true);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [role, setRole] = useState<string | null>(null);
   const [email, setEmail] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
@@ -58,6 +59,10 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
     loadSession();
   }, [router]);
+
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [pathname]);
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
@@ -98,36 +103,51 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">Bot Dashboard</div>
-        <div className="nav">
-          {navItems.map((item) => (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`nav-link ${pathname === item.href || (item.href !== "/" && pathname.startsWith(`${item.href}/`)) ? "active" : ""}`}
-            >
-              {item.label}
-            </Link>
-          ))}
-        </div>
-        <div className="card dashboard-switch-card">
-          <div className="muted">Chuyển dashboard</div>
-          <Link className="button secondary dashboard-switch-link" href="/website">
-            Website Dashboard
-          </Link>
-        </div>
-        <div className="card" style={{ boxShadow: "none" }}>
-          <div className="muted">Đăng nhập</div>
-          <div style={{ fontFamily: "var(--font-sans)", fontSize: 13 }}>
-            {email ?? "admin"}
-          </div>
-          <div style={{ marginTop: 6 }} className="badge">
-            {role ?? "admin"}
-          </div>
-          <button className="button secondary" style={{ marginTop: 12 }} onClick={handleSignOut}>
-            Đăng xuất
+      <aside className={`sidebar ${mobileNavOpen ? "open" : ""}`}>
+        <div className="sidebar-header">
+          <div className="brand">Bot Dashboard</div>
+          <button
+            className="sidebar-toggle"
+            type="button"
+            aria-expanded={mobileNavOpen}
+            aria-label={mobileNavOpen ? "Đóng menu" : "Mở menu"}
+            onClick={() => setMobileNavOpen((value) => !value)}
+          >
+            {mobileNavOpen ? "Đóng" : "Menu"}
           </button>
+        </div>
+        <div className="sidebar-body">
+          <div className="nav">
+            {navItems.map((item) => (
+              <Link
+                key={item.href}
+                href={item.href}
+                className={`nav-link ${pathname === item.href || (item.href !== "/" && pathname.startsWith(`${item.href}/`)) ? "active" : ""}`}
+              >
+                {item.label}
+              </Link>
+            ))}
+          </div>
+
+          <div className="card dashboard-switch-card">
+            <div className="muted">Chuyển dashboard</div>
+            <Link className="button secondary dashboard-switch-link" href="/website">
+              Website Dashboard
+            </Link>
+          </div>
+
+          <div className="card sidebar-account-card" style={{ boxShadow: "none" }}>
+            <div className="muted">Đăng nhập</div>
+            <div style={{ fontFamily: "var(--font-sans)", fontSize: 13 }}>
+              {email ?? "admin"}
+            </div>
+            <div style={{ marginTop: 6 }} className="badge">
+              {role ?? "admin"}
+            </div>
+            <button className="button secondary" style={{ marginTop: 12 }} onClick={handleSignOut}>
+              Đăng xuất
+            </button>
+          </div>
         </div>
       </aside>
       <main className="main">

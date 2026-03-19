@@ -5,6 +5,8 @@ const botToken = process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || "";
 const MAX_MESSAGE_LENGTH = 4096;
 const MAX_TELEGRAM_RETRIES = 2;
 const BROADCAST_RATE_WINDOW_MS = 1000;
+const WEBSITE_USER_ID_SENTINEL_BASE = 8_000_000_000_000;
+const BROADCAST_INVALID_CHAT_IDS_KEY = "broadcast_invalid_chat_ids";
 
 const toPositiveInt = (rawValue: string | undefined, fallback: number) => {
   const parsed = Number.parseInt(String(rawValue || "").trim(), 10);
@@ -18,15 +20,47 @@ const BROADCAST_MAX_SENDS_PER_WINDOW = toPositiveInt(
 const BROADCAST_WORKER_COUNT = toPositiveInt(process.env.TELEGRAM_BROADCAST_WORKERS, 40);
 const BROADCAST_SLOT_SAFETY_MS = 15;
 
-const fetchAllUserIds = async (client: any) => {
-  const ids: number[] = [];
+type BroadcastUserRow = {
+  user_id: number | string | null;
+  username?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
+};
+
+const parseStoredChatIds = (rawValue: string | null | undefined) => {
+  if (!rawValue) return [];
+  try {
+    const parsed = JSON.parse(rawValue);
+    if (!Array.isArray(parsed)) return [];
+    return Array.from(
+      new Set(
+        parsed
+          .map((value) => Number(value))
+          .filter((value) => Number.isFinite(value) && value > 0)
+      )
+    );
+  } catch {
+    return [];
+  }
+};
+
+const toOptionalString = (rawValue: unknown) => {
+  const text = typeof rawValue === "string" ? rawValue.trim() : "";
+  return text || null;
+};
+
+const hasProfileSignal = (row: BroadcastUserRow) =>
+  Boolean(toOptionalString(row.username) || toOptionalString(row.first_name) || toOptionalString(row.last_name));
+
+const fetchAllBroadcastUsers = async (client: any) => {
+  const rows: BroadcastUserRow[] = [];
   const pageSize = 1000;
   let from = 0;
 
   while (true) {
     const { data, error } = await client
       .from("users")
-      .select("user_id")
+      .select("user_id, username, first_name, last_name")
       .order("user_id", { ascending: true })
       .range(from, from + pageSize - 1);
 
@@ -38,7 +72,7 @@ const fetchAllUserIds = async (client: any) => {
       break;
     }
 
-    ids.push(...data.map((row: { user_id: number }) => row.user_id));
+    rows.push(...((data as BroadcastUserRow[]) || []));
 
     if (data.length < pageSize) {
       break;
@@ -46,7 +80,72 @@ const fetchAllUserIds = async (client: any) => {
     from += pageSize;
   }
 
-  return ids;
+  return rows;
+};
+
+const fetchInboundChatIds = async (client: any) => {
+  const chatIds = new Set<number>();
+  const pageSize = 5000;
+  let from = 0;
+
+  while (true) {
+    const { data, error } = await client
+      .from("telegram_messages")
+      .select("chat_id, message_id")
+      .eq("direction", "in")
+      .order("chat_id", { ascending: true })
+      .order("message_id", { ascending: true })
+      .range(from, from + pageSize - 1);
+
+    if (error) {
+      throw error;
+    }
+
+    const chunk = (data as Array<{ chat_id: number | string | null }>) || [];
+    if (!chunk.length) {
+      break;
+    }
+
+    for (const row of chunk) {
+      const chatId = Number(row.chat_id);
+      if (Number.isFinite(chatId) && chatId > 0) {
+        chatIds.add(chatId);
+      }
+    }
+
+    if (chunk.length < pageSize) {
+      break;
+    }
+
+    from += pageSize;
+  }
+
+  return chatIds;
+};
+
+const loadBroadcastInvalidChatIds = async (client: any) => {
+  const { data, error } = await client
+    .from("settings")
+    .select("value")
+    .eq("key", BROADCAST_INVALID_CHAT_IDS_KEY)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return new Set<number>(parseStoredChatIds(data?.value));
+};
+
+const saveBroadcastInvalidChatIds = async (client: any, chatIds: Set<number>) => {
+  const serialized = JSON.stringify(Array.from(chatIds).sort((a, b) => a - b));
+  const { error } = await client
+    .from("settings")
+    .upsert([{ key: BROADCAST_INVALID_CHAT_IDS_KEY, value: serialized }], { onConflict: "key" });
+
+  if (error) {
+    throw error;
+  }
 };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -70,7 +169,7 @@ const sendTelegramMessage = async (
   }
 ): Promise<
   | { ok: true; message_id: number | null; date: number | null; text: string }
-  | { ok: false }
+  | { ok: false; status: number | null; description: string | null; isPermanent: boolean }
 > => {
   const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: "POST",
@@ -90,7 +189,22 @@ const sendTelegramMessage = async (
   }
 
   if (!response.ok || !payload || payload.ok !== true || !payload.result) {
-    return { ok: false as const };
+    const description =
+      payload && typeof payload === "object" && typeof (payload as { description?: unknown }).description === "string"
+        ? (payload as { description: string }).description
+        : null;
+    const lowered = String(description || "").toLowerCase();
+    const isPermanent =
+      response.status === 403 ||
+      lowered.includes("chat not found") ||
+      lowered.includes("user is deactivated") ||
+      lowered.includes("bot was blocked by the user");
+    return {
+      ok: false as const,
+      status: Number.isFinite(response.status) ? response.status : null,
+      description,
+      isPermanent
+    };
   }
   const result = payload.result as { message_id?: number; date?: number; text?: string };
   return {
@@ -101,7 +215,13 @@ const sendTelegramMessage = async (
   };
 };
 
-const sendBroadcastMessages = async (targets: number[], text: string) => {
+const sendBroadcastMessages = async (
+  targets: number[],
+  text: string,
+  options?: {
+    onPermanentFailure?: (chatId: number) => void;
+  }
+) => {
   let success = 0;
   let failed = 0;
   let nextIndex = 0;
@@ -158,6 +278,9 @@ const sendBroadcastMessages = async (targets: number[], text: string) => {
         success += 1;
       } else {
         failed += 1;
+        if ("isPermanent" in result && result.isPermanent) {
+          options?.onPermanentFailure?.(chatId);
+        }
       }
     }
   };
@@ -203,9 +326,10 @@ export async function POST(request: NextRequest) {
   }
 
   let targets: number[] = [];
+  let broadcastUsers: BroadcastUserRow[] = [];
   if (broadcast) {
     try {
-      targets = await fetchAllUserIds(supabase);
+      broadcastUsers = await fetchAllBroadcastUsers(supabase);
     } catch (error) {
       return NextResponse.json({ error: "Failed to load users." }, { status: 500 });
     }
@@ -213,17 +337,75 @@ export async function POST(request: NextRequest) {
     targets = [userId];
   }
 
-  targets = Array.from(
-    new Set(targets.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0))
-  );
+  targets = broadcast
+    ? Array.from(
+        new Set(
+          broadcastUsers
+            .map((row) => Number(row.user_id))
+            .filter((value) => Number.isFinite(value) && value > 0)
+        )
+      )
+    : Array.from(
+        new Set(targets.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0))
+      );
+  const totalCandidates = targets.length;
 
-  if (!targets.length) {
-    return NextResponse.json({ success: 0, failed: 0, total: 0 });
+  if (!totalCandidates) {
+    return NextResponse.json({ success: 0, failed: 0, total: 0, attempted: 0, skipped: 0, blacklisted: 0 });
   }
 
   if (broadcast) {
-    const result = await sendBroadcastMessages(targets, trimmedMessage);
-    return NextResponse.json({ ...result, total: targets.length });
+    let invalidChatIds = new Set<number>();
+    let inboundChatIds = new Set<number>();
+    try {
+      invalidChatIds = await loadBroadcastInvalidChatIds(supabase);
+    } catch {
+      invalidChatIds = new Set<number>();
+    }
+    try {
+      inboundChatIds = await fetchInboundChatIds(supabase);
+    } catch {
+      inboundChatIds = new Set<number>();
+    }
+
+    const eligibleTargets = broadcastUsers
+      .map((row) => ({
+        chatId: Number(row.user_id),
+        hasProfile: hasProfileSignal(row)
+      }))
+      .filter(({ chatId }) => Number.isFinite(chatId) && chatId > 0)
+      .filter(({ chatId }) => chatId < WEBSITE_USER_ID_SENTINEL_BASE)
+      .filter(({ chatId }) => !invalidChatIds.has(chatId))
+      .filter(({ chatId, hasProfile }) => inboundChatIds.has(chatId) || hasProfile);
+
+    const filteredTargets = Array.from(new Set(eligibleTargets.map(({ chatId }) => chatId)));
+    const skipped = totalCandidates - filteredTargets.length;
+    const newlyInvalidChatIds = new Set<number>();
+
+    const result = await sendBroadcastMessages(filteredTargets, trimmedMessage, {
+      onPermanentFailure: (chatId) => {
+        newlyInvalidChatIds.add(chatId);
+      }
+    });
+
+    if (newlyInvalidChatIds.size) {
+      for (const chatId of newlyInvalidChatIds) {
+        invalidChatIds.add(chatId);
+      }
+      try {
+        await saveBroadcastInvalidChatIds(supabase, invalidChatIds);
+      } catch {
+        // Best-effort cache only; do not fail broadcast response.
+      }
+    }
+
+    return NextResponse.json({
+      ...result,
+      total: totalCandidates,
+      attempted: filteredTargets.length,
+      skipped,
+      blacklisted: newlyInvalidChatIds.size
+    });
   }
 
   let success = 0;

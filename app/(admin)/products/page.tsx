@@ -97,6 +97,11 @@ const formatTierSummary = (tiers: PriceTier[] | null | undefined) => {
     .join(" | ");
 };
 
+type PositionShiftRow = {
+  id: number;
+  sort_position: number;
+};
+
 export default function ProductsPage() {
   const [products, setProducts] = useState<Product[]>([]);
   const [productListTab, setProductListTab] = useState<ProductListTab>("visible");
@@ -263,6 +268,48 @@ export default function ProductsPage() {
     setEditPriceTierRows((prev) => prev.map((row) => (row.id === id ? { ...row, [field]: value } : row)));
   };
 
+  const shiftProductsForInsert = async (position: number): Promise<PositionShiftRow[]> => {
+    const { data, error } = await supabase
+      .from("products")
+      .select("id, sort_position")
+      .gte("sort_position", position)
+      .order("sort_position", { ascending: false })
+      .order("id", { ascending: false });
+
+    if (error) {
+      throw error;
+    }
+
+    const rows = ((data as Array<{ id: number; sort_position: number | null }>) || [])
+      .filter((row) => row.sort_position !== null && row.sort_position !== undefined)
+      .map((row) => ({
+        id: Number(row.id),
+        sort_position: Number(row.sort_position)
+      }));
+
+    for (const row of rows) {
+      const { error: updateError } = await supabase
+        .from("products")
+        .update({ sort_position: row.sort_position + 1 })
+        .eq("id", row.id);
+
+      if (updateError) {
+        throw updateError;
+      }
+    }
+
+    return rows;
+  };
+
+  const restoreShiftedProducts = async (rows: PositionShiftRow[]) => {
+    for (const row of rows) {
+      await supabase
+        .from("products")
+        .update({ sort_position: row.sort_position })
+        .eq("id", row.id);
+    }
+  };
+
   const handleAdd = async (event: React.FormEvent) => {
     event.preventDefault();
     const tiers = normalizeTierRows(priceTierRows);
@@ -279,6 +326,20 @@ export default function ProductsPage() {
       return;
     }
 
+    let shiftedRows: PositionShiftRow[] = [];
+    if (parsedSortPosition.value !== null) {
+      try {
+        shiftedRows = await shiftProductsForInsert(parsedSortPosition.value);
+      } catch (error: any) {
+        setProductError(
+          error?.message?.includes("sort_position")
+            ? "Thiếu cột sort_position trong products. Hãy chạy SQL migration position mới."
+            : error?.message || "Không thể chèn vị trí sản phẩm."
+        );
+        return;
+      }
+    }
+
     const { error } = await supabase.from("products").insert({
       name,
       price: parseInt(price || "0", 10),
@@ -291,6 +352,9 @@ export default function ProductsPage() {
       promo_bonus_quantity: hasPromo ? Math.trunc(bonusQty) : 0
     });
     if (error) {
+      if (shiftedRows.length) {
+        await restoreShiftedProducts(shiftedRows);
+      }
       setProductError(
         error.message.includes("sort_position")
           ? "Thiếu cột sort_position trong products. Hãy chạy SQL migration position mới."

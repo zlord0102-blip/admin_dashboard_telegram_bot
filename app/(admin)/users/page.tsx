@@ -36,6 +36,8 @@ export default function UsersPage() {
   const [broadcastTitlePresets, setBroadcastTitlePresets] = useState<string[]>([]);
   const [selectedBroadcastTitleIndex, setSelectedBroadcastTitleIndex] = useState(-1);
   const [broadcastTitleDraft, setBroadcastTitleDraft] = useState("");
+  const [titleManagerOpen, setTitleManagerOpen] = useState(false);
+  const [broadcastConfirmOpen, setBroadcastConfirmOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [presetStatus, setPresetStatus] = useState<string | null>(null);
@@ -160,9 +162,17 @@ export default function UsersPage() {
         return;
       }
       if (payload.broadcast) {
-        setStatus(
-          `✅ Đã gửi ${result.success}/${result.total}.${result.failed ? ` Lỗi: ${result.failed}.` : ""}`
-        );
+        const parts = [`✅ Đã gửi ${result.success}/${result.attempted ?? result.total}.`];
+        if (result.skipped) {
+          parts.push(`Bỏ qua: ${result.skipped}.`);
+        }
+        if (result.blacklisted) {
+          parts.push(`Đánh dấu chat lỗi vĩnh viễn: ${result.blacklisted}.`);
+        }
+        if (result.failed) {
+          parts.push(`Lỗi còn lại: ${result.failed}.`);
+        }
+        setStatus(parts.join(" "));
       } else {
         setStatus(`✅ Đã gửi cho user ${payload.userId}.`);
       }
@@ -173,14 +183,28 @@ export default function UsersPage() {
     }
   };
 
+  const selectedBroadcastTitle =
+    selectedBroadcastTitleIndex >= 0 ? broadcastTitlePresets[selectedBroadcastTitleIndex]?.trim() || "" : "";
+
+  const finalBroadcastMessage = selectedBroadcastTitle
+    ? `${selectedBroadcastTitle}\n${broadcastMessage.trim()}`.trim()
+    : broadcastMessage.trim();
+
   const handleBroadcast = async () => {
-    const message = broadcastMessage.trim();
-    const selectedTitle =
-      selectedBroadcastTitleIndex >= 0 ? broadcastTitlePresets[selectedBroadcastTitleIndex]?.trim() || "" : "";
-    const finalMessage = selectedTitle ? `${selectedTitle}\n${message}`.trim() : message;
-    if (!finalMessage) return;
-    if (!confirm("Gửi tin nhắn cho TẤT CẢ user đã nhắn bot?")) return;
-    await sendMessageRequest({ message: finalMessage, broadcast: true });
+    if (!finalBroadcastMessage) {
+      setStatus("Nhập nội dung broadcast trước khi gửi.");
+      return;
+    }
+    setBroadcastConfirmOpen(true);
+  };
+
+  const handleConfirmBroadcast = async () => {
+    if (!finalBroadcastMessage) return;
+    setBroadcastConfirmOpen(false);
+    setPresetStatus(null);
+    setStatus(null);
+    const payloadMessage = finalBroadcastMessage;
+    await sendMessageRequest({ message: payloadMessage, broadcast: true });
     setBroadcastMessage("");
   };
 
@@ -263,12 +287,8 @@ export default function UsersPage() {
 
       <div className="card">
         <h3 className="section-title">Gửi tin nhắn cho tất cả user</h3>
-        <div className="form-grid">
-          <div className="form-section">
-            <div className="section-title">Title broadcast</div>
-            <p className="muted" style={{ marginBottom: 10 }}>
-              Chọn title đã lưu để hệ thống tự ghép vào đầu nội dung khi broadcast.
-            </p>
+        <div className="broadcast-compose">
+          <div className="broadcast-toolbar">
             <select
               className="select"
               value={selectedBroadcastTitleIndex >= 0 ? String(selectedBroadcastTitleIndex) : ""}
@@ -285,40 +305,36 @@ export default function UsersPage() {
                 </option>
               ))}
             </select>
+            <button
+              className="button secondary"
+              type="button"
+              onClick={() => {
+                setPresetStatus(null);
+                setTitleManagerOpen(true);
+              }}
+            >
+              Thêm title
+            </button>
+          </div>
+          <div className="broadcast-title-meta">
+            <span className="muted">Title sẽ được ghép lên đầu nội dung broadcast.</span>
+          </div>
+          {selectedBroadcastTitleIndex >= 0 && broadcastTitlePresets[selectedBroadcastTitleIndex] && (
+            <div className="broadcast-title-preview">
+              <span className="muted">Đang dùng:</span> {broadcastTitlePresets[selectedBroadcastTitleIndex]}
+            </div>
+          )}
+          <div className="form-split">
             <textarea
               className="textarea"
-              placeholder='Ví dụ: Thông báo !!!'
-              value={broadcastTitleDraft}
-              onChange={(event) => setBroadcastTitleDraft(event.target.value)}
+              placeholder="Nhập nội dung gửi cho tất cả user đã nhắn bot"
+              value={broadcastMessage}
+              onChange={(event) => setBroadcastMessage(event.target.value)}
             />
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button className="button secondary" type="button" onClick={handleAddBroadcastTitle}>
-                Lưu title mới
-              </button>
-              <button className="button secondary" type="button" onClick={handleUpdateBroadcastTitle}>
-                Cập nhật title
-              </button>
-              <button className="button secondary" type="button" onClick={handleDeleteBroadcastTitle}>
-                Xóa title
-              </button>
-            </div>
-            {presetStatus && <p className="muted" style={{ marginTop: 8 }}>{presetStatus}</p>}
+            <button className="button" type="button" disabled={sending} onClick={handleBroadcast}>
+              {sending ? "Đang gửi..." : "Gửi tất cả"}
+            </button>
           </div>
-          <textarea
-            className="textarea"
-            placeholder="Nhập nội dung gửi cho tất cả user đã nhắn bot"
-            value={broadcastMessage}
-            onChange={(event) => setBroadcastMessage(event.target.value)}
-          />
-          {selectedBroadcastTitleIndex >= 0 && broadcastTitlePresets[selectedBroadcastTitleIndex] && (
-            <p className="muted" style={{ marginTop: -4, whiteSpace: "pre-line" }}>
-              Xem trước: {broadcastTitlePresets[selectedBroadcastTitleIndex]}
-              {broadcastMessage.trim() ? `\n${broadcastMessage.trim()}` : ""}
-            </p>
-          )}
-          <button className="button" type="button" disabled={sending} onClick={handleBroadcast}>
-            {sending ? "Đang gửi..." : "Gửi tất cả"}
-          </button>
         </div>
         {status && <p className="muted" style={{ marginTop: 8 }}>{status}</p>}
       </div>
@@ -387,6 +403,99 @@ export default function UsersPage() {
           </div>
         )}
       </div>
+
+      {titleManagerOpen && (
+        <div className="modal-backdrop" onClick={() => setTitleManagerOpen(false)}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <h3 className="section-title">Quản lý title broadcast</h3>
+            <div className="form-grid">
+              <select
+                className="select form-section"
+                value={selectedBroadcastTitleIndex >= 0 ? String(selectedBroadcastTitleIndex) : ""}
+                onChange={(event) => {
+                  const nextValue = event.target.value;
+                  setSelectedBroadcastTitleIndex(nextValue === "" ? -1 : Number(nextValue));
+                  setPresetStatus(null);
+                }}
+              >
+                <option value="">Chọn title để sửa / không chọn để thêm mới</option>
+                {broadcastTitlePresets.map((title, index) => (
+                  <option key={`${index}-${title}`} value={index}>
+                    {`Option ${index + 1}: ${title}`}
+                  </option>
+                ))}
+              </select>
+              <input
+                className="input form-section"
+                placeholder="Nhập title broadcast"
+                value={broadcastTitleDraft}
+                onChange={(event) => setBroadcastTitleDraft(event.target.value)}
+              />
+              {presetStatus && (
+                <p className="muted form-section" style={{ marginTop: -4 }}>
+                  {presetStatus}
+                </p>
+              )}
+              <div className="modal-actions">
+                <button className="button secondary" type="button" onClick={() => setTitleManagerOpen(false)}>
+                  Đóng
+                </button>
+                <button
+                  className="button secondary"
+                  type="button"
+                  onClick={handleDeleteBroadcastTitle}
+                  disabled={selectedBroadcastTitleIndex < 0}
+                >
+                  Xóa title
+                </button>
+                <button
+                  className="button secondary"
+                  type="button"
+                  onClick={handleUpdateBroadcastTitle}
+                  disabled={selectedBroadcastTitleIndex < 0 || !broadcastTitleDraft.trim()}
+                >
+                  Cập nhật
+                </button>
+                <button
+                  className="button"
+                  type="button"
+                  onClick={handleAddBroadcastTitle}
+                  disabled={!broadcastTitleDraft.trim()}
+                >
+                  Thêm mới
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {broadcastConfirmOpen && (
+        <div className="modal-backdrop" onClick={() => !sending && setBroadcastConfirmOpen(false)}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <h3 className="section-title">Xác nhận gửi broadcast</h3>
+            <p className="muted" style={{ marginBottom: 12 }}>
+              Tin nhắn này sẽ được gửi tới tất cả user đã nhắn bot.
+            </p>
+            <div className="broadcast-confirm-preview">
+              {finalBroadcastMessage || "Chưa có nội dung."}
+            </div>
+            <div className="modal-actions" style={{ marginTop: 16 }}>
+              <button
+                className="button secondary"
+                type="button"
+                disabled={sending}
+                onClick={() => setBroadcastConfirmOpen(false)}
+              >
+                Hủy
+              </button>
+              <button className="button" type="button" disabled={sending} onClick={handleConfirmBroadcast}>
+                {sending ? "Đang gửi..." : "Xác nhận gửi"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
