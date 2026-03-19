@@ -2,6 +2,10 @@
 
 import { supabase } from "@/lib/supabaseClient";
 
+const SNAPSHOT_CACHE_TTL_MS = 8_000;
+const snapshotCache = new Map<string, { expiresAt: number; data: unknown }>();
+const snapshotRequests = new Map<string, Promise<unknown>>();
+
 export type DashboardStats = {
   users: number;
   orders: number;
@@ -114,25 +118,50 @@ async function fetchAdminSnapshot<T>(path: string): Promise<T> {
   if (!token) {
     throw new Error("Chưa đăng nhập.");
   }
-
-  const response = await fetch(path, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${token}`
-    },
-    cache: "no-store"
-  });
-
-  const json = await response.json().catch(() => null);
-  if (!response.ok) {
-    throw new Error(
-      typeof json?.error === "string" && json.error.trim()
-        ? json.error
-        : "Không thể tải dữ liệu."
-    );
+  const cacheKey = `${token}:${path}`;
+  const now = Date.now();
+  const cached = snapshotCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    return cached.data as T;
   }
 
-  return (json?.data ?? null) as T;
+  const pending = snapshotRequests.get(cacheKey);
+  if (pending) {
+    return pending as Promise<T>;
+  }
+
+  const request = (async () => {
+    const response = await fetch(path, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`
+      },
+      cache: "no-store"
+    });
+
+    const json = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(
+        typeof json?.error === "string" && json.error.trim()
+          ? json.error
+          : "Không thể tải dữ liệu."
+      );
+    }
+
+    const result = (json?.data ?? null) as T;
+    snapshotCache.set(cacheKey, {
+      data: result,
+      expiresAt: Date.now() + SNAPSHOT_CACHE_TTL_MS
+    });
+    return result;
+  })();
+
+  snapshotRequests.set(cacheKey, request as Promise<unknown>);
+  try {
+    return await request;
+  } finally {
+    snapshotRequests.delete(cacheKey);
+  }
 }
 
 export const fetchDashboardSnapshot = () =>

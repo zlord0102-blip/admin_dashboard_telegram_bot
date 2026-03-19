@@ -944,7 +944,7 @@ async function loadReportsSnapshot(
   };
 }
 
-async function loadAllUsers(supabase: SupabaseClient): Promise<BaseUserRow[]> {
+async function loadAllUsersLegacy(supabase: SupabaseClient): Promise<BaseUserRow[]> {
   const pageSize = 1000;
   const rows: BaseUserRow[] = [];
   let from = 0;
@@ -971,83 +971,20 @@ async function loadAllUsers(supabase: SupabaseClient): Promise<BaseUserRow[]> {
   return rows;
 }
 
-type UsersSnapshotParams = {
-  page?: number;
-  pageSize?: number;
-  search?: string;
-};
-
-export async function getDashboardSnapshot(supabase: SupabaseClient): Promise<DashboardSnapshot> {
-  let snapshot: DashboardSnapshot;
-  const { data, error } = await supabase.rpc("admin_bot_dashboard_snapshot", { p_recent_limit: 6 });
-  if (error) {
-    if (!isMissingRpcError(error.message || "")) {
-      throw new Error(error.message || "Không thể tải dashboard snapshot.");
-    }
-    snapshot = await loadDashboardFallback(supabase);
-  } else {
-    snapshot = normalizeDashboardSnapshot(normalizeRpcData(data));
-  }
-
-  const userProfilesById = await loadUserProfilesByIds(
-    supabase,
-    snapshot.orders.map((order) => order.user_id)
-  );
-
-  return {
-    ...snapshot,
-    orders: snapshot.orders.map((order) => ({
-      ...order,
-      username: userProfilesById.get(String(order.user_id))?.username ?? order.username ?? null,
-      display_name: userProfilesById.get(String(order.user_id))?.display_name ?? order.display_name ?? null
-    }))
-  };
-}
-
-export async function getReportsSnapshot(
+async function buildUsersSnapshotFromRows(
   supabase: SupabaseClient,
-  params: ReportsSnapshotParams = {}
-): Promise<ReportsSnapshot> {
-  return loadReportsSnapshot(supabase, params);
-}
-
-export async function getUsersSnapshot(
-  supabase: SupabaseClient,
-  params: UsersSnapshotParams = {}
+  pageUsers: BaseUserRow[],
+  page: number,
+  pageSize: number,
+  totalCount: number
 ): Promise<UsersSnapshot> {
-  const safePageSize = Math.max(1, Math.min(Math.trunc(params.pageSize || 50) || 50, 200));
-  const safePage = Math.max(1, Math.trunc(params.page || 1) || 1);
-  const keyword = (params.search || "").trim().toLowerCase();
-  const keywordNoAt = keyword.replace(/^@/, "");
-
-  const allUsers = await loadAllUsers(supabase);
-  const filteredUsers = !keyword
-    ? allUsers
-    : allUsers.filter((row) => {
-        const userIdText = String(row.user_id ?? "");
-        const username = (toOptionalString(row.username) || "").toLowerCase();
-        const usernameNoAt = username.replace(/^@/, "");
-        const displayName = (buildDisplayName(row.first_name, row.last_name) || "").toLowerCase();
-
-        return (
-          userIdText.includes(keywordNoAt) ||
-          username.includes(keyword) ||
-          usernameNoAt.includes(keywordNoAt) ||
-          displayName.includes(keyword)
-        );
-      });
-
-  const totalCount = filteredUsers.length;
-  const totalPages = Math.max(1, Math.ceil(totalCount / safePageSize));
-  const page = Math.min(safePage, totalPages);
-  const from = (page - 1) * safePageSize;
-  const pageUsers = filteredUsers.slice(from, from + safePageSize);
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
 
   if (!pageUsers.length) {
     return {
       users: [],
       page,
-      pageSize: safePageSize,
+      pageSize,
       totalCount,
       totalPages
     };
@@ -1088,8 +1025,153 @@ export async function getUsersSnapshot(
       };
     }),
     page,
-    pageSize: safePageSize,
+    pageSize,
     totalCount,
     totalPages
   };
+}
+
+async function loadUsersPageFallback(
+  supabase: SupabaseClient,
+  page: number,
+  pageSize: number
+): Promise<UsersSnapshot> {
+  const loadPage = (pageIndex: number) =>
+    supabase
+      .from("users")
+      .select("*", { count: "exact" })
+      .order("created_at", { ascending: false })
+      .order("user_id", { ascending: false })
+      .range((pageIndex - 1) * pageSize, pageIndex * pageSize - 1);
+
+  const { data, error, count } = await loadPage(page);
+
+  if (error) {
+    throw new Error(error.message || "Không thể tải danh sách user.");
+  }
+
+  const totalCount = count ?? 0;
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const safePage = Math.min(page, totalPages);
+  let pageData = ((data as BaseUserRow[]) || []).slice(0, pageSize);
+  if (safePage !== page && totalCount > 0) {
+    const { data: safePageData, error: safePageError } = await loadPage(safePage);
+    if (safePageError) {
+      throw new Error(safePageError.message || "Không thể tải danh sách user.");
+    }
+    pageData = ((safePageData as BaseUserRow[]) || []).slice(0, pageSize);
+  }
+
+  return buildUsersSnapshotFromRows(supabase, pageData, safePage, pageSize, totalCount);
+}
+
+async function loadUsersSearchFallback(
+  supabase: SupabaseClient,
+  page: number,
+  pageSize: number,
+  search: string
+): Promise<UsersSnapshot> {
+  const keyword = search.trim().toLowerCase();
+  const keywordNoAt = keyword.replace(/^@/, "");
+  const allUsers = await loadAllUsersLegacy(supabase);
+  const filteredUsers = !keyword
+    ? allUsers
+    : allUsers.filter((row) => {
+        const userIdText = String(row.user_id ?? "");
+        const username = (toOptionalString(row.username) || "").toLowerCase();
+        const usernameNoAt = username.replace(/^@/, "");
+        const displayName = (buildDisplayName(row.first_name, row.last_name) || "").toLowerCase();
+
+        return (
+          userIdText.includes(keywordNoAt) ||
+          username.includes(keyword) ||
+          usernameNoAt.includes(keywordNoAt) ||
+          displayName.includes(keyword)
+        );
+      });
+
+  const totalCount = filteredUsers.length;
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const from = (safePage - 1) * pageSize;
+  const pageUsers = filteredUsers.slice(from, from + pageSize);
+
+  return buildUsersSnapshotFromRows(supabase, pageUsers, safePage, pageSize, totalCount);
+}
+
+type UsersSnapshotParams = {
+  page?: number;
+  pageSize?: number;
+  search?: string;
+};
+
+export async function getDashboardSnapshot(supabase: SupabaseClient): Promise<DashboardSnapshot> {
+  let snapshot: DashboardSnapshot;
+  const { data, error } = await supabase.rpc("admin_bot_dashboard_snapshot", { p_recent_limit: 6 });
+  if (error) {
+    if (!isMissingRpcError(error.message || "")) {
+      throw new Error(error.message || "Không thể tải dashboard snapshot.");
+    }
+    snapshot = await loadDashboardFallback(supabase);
+  } else {
+    snapshot = normalizeDashboardSnapshot(normalizeRpcData(data));
+  }
+
+  const missingProfileIds = Array.from(
+    new Set(
+      snapshot.orders
+        .filter((order) => !order.username || !order.display_name)
+        .map((order) => order.user_id)
+        .filter((userId) => userId > 0)
+    )
+  );
+  if (!missingProfileIds.length) {
+    return snapshot;
+  }
+
+  const userProfilesById = await loadUserProfilesByIds(supabase, missingProfileIds);
+
+  return {
+    ...snapshot,
+    orders: snapshot.orders.map((order) => ({
+      ...order,
+      username: userProfilesById.get(String(order.user_id))?.username ?? order.username ?? null,
+      display_name: userProfilesById.get(String(order.user_id))?.display_name ?? order.display_name ?? null
+    }))
+  };
+}
+
+export async function getReportsSnapshot(
+  supabase: SupabaseClient,
+  params: ReportsSnapshotParams = {}
+): Promise<ReportsSnapshot> {
+  return loadReportsSnapshot(supabase, params);
+}
+
+export async function getUsersSnapshot(
+  supabase: SupabaseClient,
+  params: UsersSnapshotParams = {}
+): Promise<UsersSnapshot> {
+  const safePageSize = Math.max(1, Math.min(Math.trunc(params.pageSize || 50) || 50, 200));
+  const safePage = Math.max(1, Math.trunc(params.page || 1) || 1);
+  const keyword = (params.search || "").trim().toLowerCase();
+  const { data, error } = await supabase.rpc("admin_bot_users_snapshot_page", {
+    p_page: safePage,
+    p_page_size: safePageSize,
+    p_search: keyword || null
+  });
+
+  if (error) {
+    if (!isMissingRpcError(error.message || "")) {
+      throw new Error(error.message || "Không thể tải users snapshot.");
+    }
+
+    if (!keyword) {
+      return loadUsersPageFallback(supabase, safePage, safePageSize);
+    }
+
+    return loadUsersSearchFallback(supabase, safePage, safePageSize, keyword);
+  }
+
+  return normalizeUsersSnapshot(normalizeRpcData(data));
 }

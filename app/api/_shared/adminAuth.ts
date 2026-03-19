@@ -1,4 +1,4 @@
-import { createClient, type SupabaseClient, type User } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { NextRequest, NextResponse } from "next/server";
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
@@ -22,7 +22,6 @@ export const buildSupabaseClient = (token?: string) =>
 type AdminSessionSuccess = {
   ok: true;
   supabase: SupabaseClient;
-  user: User;
   token: string;
 };
 
@@ -32,6 +31,17 @@ type AdminSessionFailure = {
 };
 
 export type AdminSessionResult = AdminSessionSuccess | AdminSessionFailure;
+
+const isUnauthorizedAuthError = (message: string) => {
+  const lowered = message.toLowerCase();
+  return (
+    lowered.includes("jwt") ||
+    lowered.includes("token") ||
+    lowered.includes("authorization") ||
+    lowered.includes("auth session missing") ||
+    lowered.includes("expired")
+  );
+};
 
 export async function requireAdminSession(request: NextRequest): Promise<AdminSessionResult> {
   if (!supabaseUrl || !supabaseAnonKey) {
@@ -50,23 +60,23 @@ export async function requireAdminSession(request: NextRequest): Promise<AdminSe
     };
   }
 
-  const authClient = buildSupabaseClient();
-  const { data: userData, error: userError } = await authClient.auth.getUser(token);
-  if (userError || !userData.user) {
-    return {
-      ok: false,
-      response: NextResponse.json({ error: "Unauthorized." }, { status: 401 })
-    };
-  }
-
   const supabase = buildSupabaseClient(token);
   const { data: adminRow, error: adminError } = await supabase
     .from("admin_users")
     .select("role")
-    .eq("user_id", userData.user.id)
     .maybeSingle();
 
-  if (adminError || !adminRow) {
+  if (adminError) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: isUnauthorizedAuthError(adminError.message || "") ? "Unauthorized." : "Forbidden." },
+        { status: isUnauthorizedAuthError(adminError.message || "") ? 401 : 403 }
+      )
+    };
+  }
+
+  if (!adminRow) {
     return {
       ok: false,
       response: NextResponse.json({ error: "Forbidden." }, { status: 403 })
@@ -76,7 +86,6 @@ export async function requireAdminSession(request: NextRequest): Promise<AdminSe
   return {
     ok: true,
     supabase,
-    user: userData.user,
     token
   };
 }
