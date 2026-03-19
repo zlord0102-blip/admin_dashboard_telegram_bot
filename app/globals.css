@@ -686,6 +686,12 @@ p {
   flex-wrap: wrap;
 }
 
+.order-count-button {
+  min-width: 68px;
+  padding-inline: 10px;
+  box-shadow: none;
+}
+
 .product-actions-cell {
   min-width: 260px;
 }
@@ -716,6 +722,7 @@ p {
   justify-content: center;
   z-index: 50;
   padding: 20px;
+  overflow-y: auto;
 }
 
 .modal {
@@ -728,11 +735,59 @@ p {
   animation: rise 0.25s ease both;
 }
 
+.modal.modal-wide {
+  width: min(1080px, 96vw);
+}
+
+.modal-scrollable {
+  max-height: calc(100vh - 40px);
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  overflow: hidden;
+}
+
+.modal-scroll-region {
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
   grid-column: 1 / -1;
+}
+
+.order-history-stats {
+  margin-bottom: 14px;
+}
+
+.order-history-table-wrap {
+  overflow-x: auto;
+  overflow-y: visible;
+}
+
+.order-history-table {
+  min-width: 760px;
+}
+
+.order-history-detail-row td {
+  padding-top: 0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.order-history-content {
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.56);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  font-size: 12px;
+  line-height: 1.6;
+  max-height: 220px;
+  overflow: auto;
 }
 
 .chat-card {
@@ -963,6 +1018,10 @@ p {
   .modal {
     width: min(92vw, 640px);
     padding: 18px;
+  }
+
+  .modal.modal-wide {
+    width: min(96vw, 720px);
   }
 
   .modal-actions {

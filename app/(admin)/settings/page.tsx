@@ -11,6 +11,8 @@ const SETTINGS_KEYS = [
   "binance_pay_id",
   "admin_contact",
   "support_contacts",
+  "shop_intro_text",
+  "support_panel_text",
   "payment_notify_bot_token",
   "payment_notify_user_id",
   "shop_page_size",
@@ -126,6 +128,18 @@ export default function SettingsPage() {
             onChange={(e) => updateField("admin_contact", e.target.value)}
           />
           <div className="form-section">
+            <div className="section-title">Text menu Danh mục</div>
+            <p className="muted" style={{ marginBottom: 10 }}>
+              Nội dung hiển thị cùng danh sách sản phẩm trong bot. Để trống nếu muốn dùng text mặc định.
+            </p>
+            <textarea
+              className="textarea"
+              placeholder={"🤖 TUNVN PREHUB BOT — AUTO ORDER 🤖\n\n👨‍💼 Hỗ trợ: @tunvn2002 | Zalo: 0923159688\n🎁 Khuyến mãi: Mua 10 tặng 2\n\n🛍️ Chọn sản phẩm để mua:"}
+              value={values.shop_intro_text || ""}
+              onChange={(e) => updateField("shop_intro_text", e.target.value)}
+            />
+          </div>
+          <div className="form-section">
             <div className="section-title">Relay thông báo thanh toán</div>
             <p className="muted" style={{ marginBottom: 10 }}>
               Khi đơn thanh toán thành công, hệ thống sẽ gửi thông báo sang bot Telegram khác.
@@ -153,6 +167,18 @@ export default function SettingsPage() {
               placeholder={"Telegram|https://t.me/your_admin\nFacebook|https://facebook.com/your_page\nZalo|https://zalo.me/0900000000"}
               value={values.support_contacts || ""}
               onChange={(e) => updateField("support_contacts", e.target.value)}
+            />
+          </div>
+          <div className="form-section">
+            <div className="section-title">Text màn hình Hỗ trợ</div>
+            <p className="muted" style={{ marginBottom: 10 }}>
+              Nội dung hiển thị khi user bấm `Hỗ trợ`. Có thể dùng nhiều dòng; nếu có cấu hình liên hệ, nút link vẫn hiển thị bên dưới.
+            </p>
+            <textarea
+              className="textarea"
+              placeholder={"💬 HỖ TRỢ KHÁCH HÀNG\n────────────────\n\n📋 Liên hệ Admin: @your_admin\n📱 Zalo: 0900000000\n\n⏰ Thời gian hỗ trợ:\n8:00 - 23:00 hàng ngày\n\n📝 Lưu ý:\n├ Gửi mã giao dịch khi cần hỗ trợ\n├ Mô tả rõ vấn đề gặp phải\n└ Chờ phản hồi trong 5-10 phút"}
+              value={values.support_panel_text || ""}
+              onChange={(e) => updateField("support_panel_text", e.target.value)}
             />
           </div>
           <div className="form-section">

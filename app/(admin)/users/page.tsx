@@ -1,10 +1,14 @@
 "use client";
 
-import { useDeferredValue, useEffect, useState } from "react";
+import { Fragment, useDeferredValue, useEffect, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabaseClient";
 import {
+  fetchUserOrdersSnapshot,
   fetchUsersSnapshot,
+  type UsersFilterMode,
+  type UsersSortMode,
+  type UserOrdersSnapshot,
   type UserSnapshotRow,
   type UsersSnapshot
 } from "@/lib/adminAnalyticsClient";
@@ -32,6 +36,8 @@ export default function UsersPage() {
   const PAGE_SIZE = 50;
   const [users, setUsers] = useState<UserSnapshotRow[]>([]);
   const [search, setSearch] = useState("");
+  const [filterMode, setFilterMode] = useState<UsersFilterMode>("all");
+  const [sortMode, setSortMode] = useState<UsersSortMode>("newest");
   const [broadcastMessage, setBroadcastMessage] = useState("");
   const [broadcastTitlePresets, setBroadcastTitlePresets] = useState<string[]>([]);
   const [selectedBroadcastTitleIndex, setSelectedBroadcastTitleIndex] = useState(-1);
@@ -44,13 +50,25 @@ export default function UsersPage() {
   const [page, setPage] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
+  const [selectedOrdersUser, setSelectedOrdersUser] = useState<UserSnapshotRow | null>(null);
+  const [userOrdersSnapshot, setUserOrdersSnapshot] = useState<UserOrdersSnapshot | null>(null);
+  const [userOrdersOpen, setUserOrdersOpen] = useState(false);
+  const [userOrdersLoading, setUserOrdersLoading] = useState(false);
+  const [userOrdersError, setUserOrdersError] = useState<string | null>(null);
   const deferredSearch = useDeferredValue(search);
 
-  const load = async (pageIndex: number, keyword: string) => {
+  const load = async (
+    pageIndex: number,
+    keyword: string,
+    nextFilterMode: UsersFilterMode,
+    nextSortMode: UsersSortMode
+  ) => {
     const snapshot: UsersSnapshot = await fetchUsersSnapshot({
       page: pageIndex,
       pageSize: PAGE_SIZE,
-      search: keyword
+      search: keyword,
+      filterMode: nextFilterMode,
+      sortMode: nextSortMode
     });
     setUsers(snapshot.users);
     setTotalCount(snapshot.totalCount);
@@ -94,12 +112,12 @@ export default function UsersPage() {
   };
 
   useEffect(() => {
-    load(page, deferredSearch).catch(() => {
+    load(page, deferredSearch, filterMode, sortMode).catch(() => {
       setUsers([]);
       setTotalCount(0);
       setTotalPages(1);
     });
-  }, [page, deferredSearch]);
+  }, [page, deferredSearch, filterMode, sortMode]);
 
   useEffect(() => {
     loadBroadcastTitlePresets().catch(() => {
@@ -109,7 +127,7 @@ export default function UsersPage() {
 
   useEffect(() => {
     setPage(1);
-  }, [search]);
+  }, [search, filterMode, sortMode]);
 
   useEffect(() => {
     if (selectedBroadcastTitleIndex < 0 || selectedBroadcastTitleIndex >= broadcastTitlePresets.length) {
@@ -265,6 +283,29 @@ export default function UsersPage() {
     }
   };
 
+  const openUserOrders = async (user: UserSnapshotRow) => {
+    setSelectedOrdersUser(user);
+    setUserOrdersOpen(true);
+    setUserOrdersLoading(true);
+    setUserOrdersError(null);
+    setUserOrdersSnapshot(null);
+
+    try {
+      const snapshot = await fetchUserOrdersSnapshot(user.user_id);
+      setUserOrdersSnapshot(snapshot);
+    } catch {
+      setUserOrdersError("Không thể tải lịch sử đơn hàng của user.");
+    } finally {
+      setUserOrdersLoading(false);
+    }
+  };
+
+  const closeUserOrdersModal = () => {
+    setUserOrdersOpen(false);
+    setUserOrdersError(null);
+    setUserOrdersLoading(false);
+  };
+
   return (
     <div className="grid" style={{ gap: 24 }}>
       <div className="topbar">
@@ -282,7 +323,34 @@ export default function UsersPage() {
             value={search}
             onChange={(event) => setSearch(event.target.value)}
           />
+          <select
+            className="select"
+            value={filterMode}
+            onChange={(event) => setFilterMode(event.target.value as UsersFilterMode)}
+          >
+            <option value="all">Tất cả user</option>
+            <option value="with_revenue">User có doanh thu</option>
+            <option value="without_revenue">User chưa có doanh thu</option>
+            <option value="with_orders">User có đơn hàng</option>
+          </select>
+          <select
+            className="select"
+            value={sortMode}
+            onChange={(event) => setSortMode(event.target.value as UsersSortMode)}
+          >
+            <option value="newest">Mới tạo gần đây</option>
+            <option value="oldest">Cũ nhất</option>
+            <option value="username_asc">Username A-Z</option>
+            <option value="username_desc">Username Z-A</option>
+            <option value="revenue_desc">Doanh thu cao đến thấp</option>
+            <option value="revenue_asc">Doanh thu thấp đến cao</option>
+            <option value="order_count_desc">Số đơn cao đến thấp</option>
+            <option value="order_count_asc">Số đơn thấp đến cao</option>
+          </select>
         </div>
+        <p className="muted" style={{ marginTop: 10 }}>
+          Tổng phù hợp: {totalCount.toLocaleString("vi-VN")} user.
+        </p>
       </div>
 
       <div className="card">
@@ -361,7 +429,19 @@ export default function UsersPage() {
                 <td>{user.user_id}</td>
                 <td>{user.username ?? "-"}</td>
                 <td>{user.display_name ?? "-"}</td>
-                <td>{user.order_count.toLocaleString("vi-VN")}</td>
+                <td>
+                  {user.order_count > 0 ? (
+                    <button
+                      className="button secondary order-count-button"
+                      type="button"
+                      onClick={() => openUserOrders(user)}
+                    >
+                      {user.order_count.toLocaleString("vi-VN")}
+                    </button>
+                  ) : (
+                    "0"
+                  )}
+                </td>
                 <td>{user.total_paid.toLocaleString("vi-VN")}</td>
                 <td>{(user.balance || 0).toLocaleString()}</td>
                 <td>{user.balance_usdt?.toString() ?? "0"}</td>
@@ -403,6 +483,87 @@ export default function UsersPage() {
           </div>
         )}
       </div>
+
+      {userOrdersOpen && (
+        <div className="modal-backdrop" onClick={() => !userOrdersLoading && closeUserOrdersModal()}>
+          <div className="modal modal-wide modal-scrollable" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-scroll-region">
+              <div className="topbar" style={{ marginBottom: 12 }}>
+                <div>
+                  <h3 className="section-title" style={{ marginBottom: 6 }}>Chi tiết đơn hàng đã mua</h3>
+                  <p className="muted">
+                    User ID: {selectedOrdersUser?.user_id ?? "-"} · Username: {selectedOrdersUser?.username ?? "-"} ·
+                    Tên người dùng: {selectedOrdersUser?.display_name ?? "-"}
+                  </p>
+                </div>
+              </div>
+
+              {!userOrdersLoading && !userOrdersError && userOrdersSnapshot && (
+                <div className="grid stats order-history-stats">
+                  <div className="card">
+                    <p className="muted">Tổng đơn</p>
+                    <h3>{userOrdersSnapshot.orderCount.toLocaleString("vi-VN")}</h3>
+                  </div>
+                  <div className="card">
+                    <p className="muted">Tổng đã mua</p>
+                    <h3>{userOrdersSnapshot.totalPaid.toLocaleString("vi-VN")}đ</h3>
+                  </div>
+                </div>
+              )}
+
+              {userOrdersLoading ? (
+                <p className="muted">Đang tải lịch sử đơn hàng...</p>
+              ) : userOrdersError ? (
+                <p className="muted" style={{ color: "var(--danger)" }}>
+                  {userOrdersError}
+                </p>
+              ) : userOrdersSnapshot?.orders.length ? (
+                <div className="order-history-table-wrap">
+                  <table className="table fixed order-history-table">
+                    <thead>
+                      <tr>
+                        <th>ID</th>
+                        <th>Sản phẩm</th>
+                        <th>SL</th>
+                        <th>Giá</th>
+                        <th>Thời gian</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {userOrdersSnapshot.orders.map((order) => (
+                        <Fragment key={order.id}>
+                          <tr>
+                            <td>#{order.id}</td>
+                            <td>{order.product_name}</td>
+                            <td>{order.quantity}</td>
+                            <td>{order.price.toLocaleString("vi-VN")}đ</td>
+                            <td>{formatDateTime(order.created_at)}</td>
+                          </tr>
+                          <tr className="order-history-detail-row">
+                            <td colSpan={5}>
+                              <div className="order-history-content">
+                                {order.content?.trim() || "Không có nội dung chi tiết lưu trong đơn hàng này."}
+                              </div>
+                            </td>
+                          </tr>
+                        </Fragment>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="muted">User này chưa có đơn hàng đã mua.</p>
+              )}
+            </div>
+
+            <div className="modal-actions" style={{ marginTop: 16 }}>
+              <button className="button secondary" type="button" onClick={closeUserOrdersModal}>
+                Đóng
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {titleManagerOpen && (
         <div className="modal-backdrop" onClick={() => setTitleManagerOpen(false)}>

@@ -100,6 +100,36 @@ export type UsersSnapshot = {
   totalPages: number;
 };
 
+export type UsersFilterMode = "all" | "with_revenue" | "without_revenue" | "with_orders";
+
+export type UsersSortMode =
+  | "newest"
+  | "oldest"
+  | "username_asc"
+  | "username_desc"
+  | "revenue_desc"
+  | "revenue_asc"
+  | "order_count_desc"
+  | "order_count_asc";
+
+export type UserOrderHistoryRow = {
+  id: number;
+  user_id: number;
+  product_id: number;
+  product_name: string;
+  price: number;
+  quantity: number;
+  created_at: string;
+  content: string | null;
+};
+
+export type UserOrdersSnapshot = {
+  user_id: number;
+  orderCount: number;
+  totalPaid: number;
+  orders: UserOrderHistoryRow[];
+};
+
 export type ReportsPeriod = "today" | "month" | "quarter" | "custom_month" | "all_time";
 
 export type ReportsSnapshotParams = {
@@ -162,6 +192,117 @@ const buildDisplayName = (firstName: unknown, lastName: unknown) => {
   const parts = [toOptionalString(firstName), toOptionalString(lastName)].filter(Boolean) as string[];
   if (!parts.length) return null;
   return parts.join(" ");
+};
+
+const normalizeUsersFilterMode = (value: unknown): UsersFilterMode => {
+  switch (String(value || "").trim().toLowerCase()) {
+    case "with_revenue":
+      return "with_revenue";
+    case "without_revenue":
+      return "without_revenue";
+    case "with_orders":
+      return "with_orders";
+    default:
+      return "all";
+  }
+};
+
+const normalizeUsersSortMode = (value: unknown): UsersSortMode => {
+  switch (String(value || "").trim().toLowerCase()) {
+    case "oldest":
+      return "oldest";
+    case "username_asc":
+      return "username_asc";
+    case "username_desc":
+      return "username_desc";
+    case "revenue_desc":
+      return "revenue_desc";
+    case "revenue_asc":
+      return "revenue_asc";
+    case "order_count_desc":
+      return "order_count_desc";
+    case "order_count_asc":
+      return "order_count_asc";
+    default:
+      return "newest";
+  }
+};
+
+const matchesUserSearch = (row: BaseUserRow, search: string) => {
+  const keyword = search.trim().toLowerCase();
+  if (!keyword) return true;
+
+  const keywordNoAt = keyword.replace(/^@/, "");
+  const userIdText = String(row.user_id ?? "");
+  const username = (toOptionalString(row.username) || "").toLowerCase();
+  const usernameNoAt = username.replace(/^@/, "");
+  const displayName = (buildDisplayName(row.first_name, row.last_name) || "").toLowerCase();
+
+  return (
+    userIdText.includes(keywordNoAt) ||
+    username.includes(keyword) ||
+    usernameNoAt.includes(keywordNoAt) ||
+    displayName.includes(keyword)
+  );
+};
+
+const toDateSortValue = (value: string | null | undefined) => {
+  if (!value) return 0;
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+};
+
+const compareOptionalText = (left: string | null | undefined, right: string | null | undefined, direction: 1 | -1) => {
+  const leftText = (left || "").trim().toLocaleLowerCase("vi");
+  const rightText = (right || "").trim().toLocaleLowerCase("vi");
+
+  if (!leftText && !rightText) return 0;
+  if (!leftText) return 1;
+  if (!rightText) return -1;
+
+  return leftText.localeCompare(rightText, "vi", { sensitivity: "base" }) * direction;
+};
+
+const compareUserRows = (left: UserSnapshotRow, right: UserSnapshotRow, sortMode: UsersSortMode) => {
+  const newestFallback = () => {
+    const createdDelta = toDateSortValue(right.created_at) - toDateSortValue(left.created_at);
+    if (createdDelta !== 0) return createdDelta;
+    return right.user_id - left.user_id;
+  };
+
+  switch (sortMode) {
+    case "oldest": {
+      const createdDelta = toDateSortValue(left.created_at) - toDateSortValue(right.created_at);
+      if (createdDelta !== 0) return createdDelta;
+      return left.user_id - right.user_id;
+    }
+    case "username_asc": {
+      const nameDelta = compareOptionalText(left.username, right.username, 1);
+      return nameDelta !== 0 ? nameDelta : newestFallback();
+    }
+    case "username_desc": {
+      const nameDelta = compareOptionalText(left.username, right.username, -1);
+      return nameDelta !== 0 ? nameDelta : newestFallback();
+    }
+    case "revenue_desc": {
+      const revenueDelta = right.total_paid - left.total_paid;
+      return revenueDelta !== 0 ? revenueDelta : newestFallback();
+    }
+    case "revenue_asc": {
+      const revenueDelta = left.total_paid - right.total_paid;
+      return revenueDelta !== 0 ? revenueDelta : newestFallback();
+    }
+    case "order_count_desc": {
+      const orderDelta = right.order_count - left.order_count;
+      return orderDelta !== 0 ? orderDelta : newestFallback();
+    }
+    case "order_count_asc": {
+      const orderDelta = left.order_count - right.order_count;
+      return orderDelta !== 0 ? orderDelta : newestFallback();
+    }
+    default:
+      return newestFallback();
+  }
 };
 
 const toObjectArray = (value: unknown) =>
@@ -472,6 +613,22 @@ const normalizeUsersSnapshot = (data: RpcObject): UsersSnapshot => ({
   pageSize: toNumber(data?.pageSize, 50),
   totalCount: toNumber(data?.totalCount),
   totalPages: toNumber(data?.totalPages, 1)
+});
+
+const normalizeUserOrdersSnapshot = (data: RpcObject): UserOrdersSnapshot => ({
+  user_id: toNumber(data?.user_id),
+  orderCount: toNumber(data?.orderCount),
+  totalPaid: toNumber(data?.totalPaid),
+  orders: toObjectArray(data?.orders).map((row) => ({
+    id: toNumber(row.id),
+    user_id: toNumber(row.user_id),
+    product_id: toNumber(row.product_id),
+    product_name: String(row.product_name || `#${toNumber(row.product_id)}`),
+    price: toNumber(row.price),
+    quantity: toNumber(row.quantity),
+    created_at: String(row.created_at || ""),
+    content: toOptionalString(row.content)
+  }))
 });
 
 const toDateKey = (value: Date | string) =>
@@ -971,6 +1128,56 @@ async function loadAllUsersLegacy(supabase: SupabaseClient): Promise<BaseUserRow
   return rows;
 }
 
+async function hydrateUsersWithStats(
+  supabase: SupabaseClient,
+  users: BaseUserRow[]
+): Promise<UserSnapshotRow[]> {
+  if (!users.length) {
+    return [];
+  }
+
+  const userIds = Array.from(
+    new Set(users.map((user) => toNumber(user.user_id)).filter((value) => value > 0))
+  );
+  const statsByUser = new Map<number, { orderCount: number; totalPaid: number }>();
+  const chunkSize = 500;
+
+  for (let index = 0; index < userIds.length; index += chunkSize) {
+    const idChunk = userIds.slice(index, index + chunkSize);
+    const { data: orderData, error: orderError } = await supabase
+      .from("orders")
+      .select("user_id, price")
+      .in("user_id", idChunk);
+
+    if (orderError) {
+      throw new Error(orderError.message || "Không thể tải thống kê đơn hàng của user.");
+    }
+
+    ((orderData as Array<{ user_id: number; price: number | null }>) || []).forEach((order) => {
+      const current = statsByUser.get(order.user_id) || { orderCount: 0, totalPaid: 0 };
+      current.orderCount += 1;
+      current.totalPaid += Number(order.price || 0);
+      statsByUser.set(order.user_id, current);
+    });
+  }
+
+  return users.map((user) => {
+    const userId = toNumber(user.user_id);
+    const stats = statsByUser.get(userId);
+    return {
+      user_id: userId,
+      username: toOptionalString(user.username),
+      display_name: buildDisplayName(user.first_name, user.last_name),
+      balance: toNumber(user.balance),
+      balance_usdt: toNumber(user.balance_usdt),
+      language: toOptionalString(user.language),
+      created_at: toOptionalString(user.created_at),
+      order_count: stats?.orderCount ?? 0,
+      total_paid: stats?.totalPaid ?? 0
+    };
+  });
+}
+
 async function buildUsersSnapshotFromRows(
   supabase: SupabaseClient,
   pageUsers: BaseUserRow[],
@@ -990,40 +1197,10 @@ async function buildUsersSnapshotFromRows(
     };
   }
 
-  const userIds = pageUsers.map((user) => toNumber(user.user_id)).filter((value) => value > 0);
-  const { data: orderData, error: orderError } = await supabase
-    .from("orders")
-    .select("user_id, price")
-    .in("user_id", userIds);
-
-  if (orderError) {
-    throw new Error(orderError.message || "Không thể tải thống kê đơn hàng của user.");
-  }
-
-  const statsByUser = new Map<number, { orderCount: number; totalPaid: number }>();
-  ((orderData as Array<{ user_id: number; price: number | null }>) || []).forEach((order) => {
-    const current = statsByUser.get(order.user_id) || { orderCount: 0, totalPaid: 0 };
-    current.orderCount += 1;
-    current.totalPaid += Number(order.price || 0);
-    statsByUser.set(order.user_id, current);
-  });
+  const hydratedUsers = await hydrateUsersWithStats(supabase, pageUsers);
 
   return {
-    users: pageUsers.map((user) => {
-      const userId = toNumber(user.user_id);
-      const stats = statsByUser.get(userId);
-      return {
-        user_id: userId,
-        username: toOptionalString(user.username),
-        display_name: buildDisplayName(user.first_name, user.last_name),
-        balance: toNumber(user.balance),
-        balance_usdt: toNumber(user.balance_usdt),
-        language: toOptionalString(user.language),
-        created_at: toOptionalString(user.created_at),
-        order_count: stats?.orderCount ?? 0,
-        total_paid: stats?.totalPaid ?? 0
-      };
-    }),
+    users: hydratedUsers,
     page,
     pageSize,
     totalCount,
@@ -1071,24 +1248,8 @@ async function loadUsersSearchFallback(
   pageSize: number,
   search: string
 ): Promise<UsersSnapshot> {
-  const keyword = search.trim().toLowerCase();
-  const keywordNoAt = keyword.replace(/^@/, "");
   const allUsers = await loadAllUsersLegacy(supabase);
-  const filteredUsers = !keyword
-    ? allUsers
-    : allUsers.filter((row) => {
-        const userIdText = String(row.user_id ?? "");
-        const username = (toOptionalString(row.username) || "").toLowerCase();
-        const usernameNoAt = username.replace(/^@/, "");
-        const displayName = (buildDisplayName(row.first_name, row.last_name) || "").toLowerCase();
-
-        return (
-          userIdText.includes(keywordNoAt) ||
-          username.includes(keyword) ||
-          usernameNoAt.includes(keywordNoAt) ||
-          displayName.includes(keyword)
-        );
-      });
+  const filteredUsers = allUsers.filter((row) => matchesUserSearch(row, search));
 
   const totalCount = filteredUsers.length;
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
@@ -1099,11 +1260,127 @@ async function loadUsersSearchFallback(
   return buildUsersSnapshotFromRows(supabase, pageUsers, safePage, pageSize, totalCount);
 }
 
+async function loadUsersFilteredSortedFallback(
+  supabase: SupabaseClient,
+  page: number,
+  pageSize: number,
+  search: string,
+  filterMode: UsersFilterMode,
+  sortMode: UsersSortMode
+): Promise<UsersSnapshot> {
+  const allUsers = await loadAllUsersLegacy(supabase);
+  const searchedUsers = allUsers.filter((row) => matchesUserSearch(row, search));
+  const hydratedUsers = await hydrateUsersWithStats(supabase, searchedUsers);
+
+  const filteredUsers = hydratedUsers.filter((user) => {
+    if (filterMode === "with_revenue") {
+      return user.total_paid > 0;
+    }
+    if (filterMode === "without_revenue") {
+      return user.total_paid <= 0;
+    }
+    if (filterMode === "with_orders") {
+      return user.order_count > 0;
+    }
+    return true;
+  });
+
+  const sortedUsers = [...filteredUsers].sort((left, right) => compareUserRows(left, right, sortMode));
+  const totalCount = sortedUsers.length;
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const from = (safePage - 1) * pageSize;
+
+  return {
+    users: sortedUsers.slice(from, from + pageSize),
+    page: safePage,
+    pageSize,
+    totalCount,
+    totalPages
+  };
+}
+
 type UsersSnapshotParams = {
   page?: number;
   pageSize?: number;
   search?: string;
+  filterMode?: UsersFilterMode | string;
+  sortMode?: UsersSortMode | string;
 };
+
+export async function getUserOrdersSnapshot(
+  supabase: SupabaseClient,
+  userId: number
+): Promise<UserOrdersSnapshot> {
+  const safeUserId = Math.trunc(userId);
+  if (!Number.isFinite(safeUserId) || safeUserId <= 0) {
+    return {
+      user_id: safeUserId,
+      orderCount: 0,
+      totalPaid: 0,
+      orders: []
+    };
+  }
+
+  const { data, error } = await supabase
+    .from("orders")
+    .select("id, user_id, product_id, price, quantity, created_at, content")
+    .eq("user_id", safeUserId)
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false });
+
+  if (error) {
+    throw new Error(error.message || "Không thể tải lịch sử đơn hàng của user.");
+  }
+
+  const orders = (data as Array<Record<string, unknown>>) || [];
+  if (!orders.length) {
+    return {
+      user_id: safeUserId,
+      orderCount: 0,
+      totalPaid: 0,
+      orders: []
+    };
+  }
+
+  const productIds = Array.from(
+    new Set(
+      orders
+        .map((order) => order.product_id)
+        .filter((value): value is number | string => value !== null && value !== undefined)
+        .map(String)
+    )
+  );
+
+  const { data: productRows, error: productError } = productIds.length
+    ? await supabase.from("products").select("id, name").in("id", productIds)
+    : { data: [], error: null };
+
+  if (productError) {
+    throw new Error(productError.message || "Không thể tải tên sản phẩm.");
+  }
+
+  const productNamesById = new Map<string, string>();
+  for (const product of (productRows as Array<Record<string, unknown>>) || []) {
+    productNamesById.set(String(product.id), String(product.name || `#${String(product.id || "-")}`));
+  }
+
+  return normalizeUserOrdersSnapshot({
+    user_id: safeUserId,
+    orderCount: orders.length,
+    totalPaid: orders.reduce((sum, order) => sum + toNumber(order.price), 0),
+    orders: orders.map((order) => ({
+      id: toNumber(order.id),
+      user_id: safeUserId,
+      product_id: toNumber(order.product_id),
+      product_name: productNamesById.get(String(order.product_id)) || `#${String(order.product_id || "-")}`,
+      price: toNumber(order.price),
+      quantity: toNumber(order.quantity),
+      created_at: String(order.created_at || ""),
+      content: toOptionalString(order.content)
+    }))
+  });
+}
 
 export async function getDashboardSnapshot(supabase: SupabaseClient): Promise<DashboardSnapshot> {
   let snapshot: DashboardSnapshot;
@@ -1155,6 +1432,20 @@ export async function getUsersSnapshot(
   const safePageSize = Math.max(1, Math.min(Math.trunc(params.pageSize || 50) || 50, 200));
   const safePage = Math.max(1, Math.trunc(params.page || 1) || 1);
   const keyword = (params.search || "").trim().toLowerCase();
+  const filterMode = normalizeUsersFilterMode(params.filterMode);
+  const sortMode = normalizeUsersSortMode(params.sortMode);
+
+  if (filterMode !== "all" || sortMode !== "newest") {
+    return loadUsersFilteredSortedFallback(
+      supabase,
+      safePage,
+      safePageSize,
+      keyword,
+      filterMode,
+      sortMode
+    );
+  }
+
   const { data, error } = await supabase.rpc("admin_bot_users_snapshot_page", {
     p_page: safePage,
     p_page_size: safePageSize,

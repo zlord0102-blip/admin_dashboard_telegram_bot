@@ -112,6 +112,36 @@ export type UsersSnapshot = {
   totalPages: number;
 };
 
+export type UsersFilterMode = "all" | "with_revenue" | "without_revenue" | "with_orders";
+
+export type UsersSortMode =
+  | "newest"
+  | "oldest"
+  | "username_asc"
+  | "username_desc"
+  | "revenue_desc"
+  | "revenue_asc"
+  | "order_count_desc"
+  | "order_count_asc";
+
+export type UserOrderHistoryRow = {
+  id: number;
+  user_id: number;
+  product_id: number;
+  product_name: string;
+  price: number;
+  quantity: number;
+  created_at: string;
+  content: string | null;
+};
+
+export type UserOrdersSnapshot = {
+  user_id: number;
+  orderCount: number;
+  totalPaid: number;
+  orders: UserOrderHistoryRow[];
+};
+
 async function fetchAdminSnapshot<T>(path: string): Promise<T> {
   const { data } = await supabase.auth.getSession();
   const token = data.session?.access_token;
@@ -187,15 +217,24 @@ export const fetchReportsSnapshot = ({
 export const fetchUsersSnapshot = ({
   page = 1,
   pageSize = 50,
-  search = ""
+  search = "",
+  filterMode = "all",
+  sortMode = "newest"
 }: {
   page?: number;
   pageSize?: number;
   search?: string;
+  filterMode?: UsersFilterMode;
+  sortMode?: UsersSortMode;
 }) =>
   fetchAdminSnapshot<UsersSnapshot>(
     `/api/admin-analytics/users?page=${Math.max(1, Math.trunc(page) || 1)}&pageSize=${Math.max(
       1,
       Math.min(Math.trunc(pageSize) || 50, 200)
-    )}&q=${encodeURIComponent(search)}`
+    )}&q=${encodeURIComponent(search)}&filter=${encodeURIComponent(filterMode)}&sort=${encodeURIComponent(sortMode)}`
+  );
+
+export const fetchUserOrdersSnapshot = (userId: number) =>
+  fetchAdminSnapshot<UserOrdersSnapshot>(
+    `/api/admin-analytics/users/${Math.max(1, Math.trunc(userId) || 0)}/orders`
   );
