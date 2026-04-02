@@ -13,17 +13,21 @@ export default function DashboardPage() {
   const [orders, setOrders] = useState<DashboardOrderRow[]>([]);
   const [pendingDeposits, setPendingDeposits] = useState(0);
   const [pendingWithdrawals, setPendingWithdrawals] = useState(0);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const loadDashboard = async () => {
+    const snapshot: DashboardSnapshot = await fetchDashboardSnapshot();
+    setStats(snapshot.stats);
+    setOrders(snapshot.orders);
+    setPendingDeposits(snapshot.pendingDeposits);
+    setPendingWithdrawals(snapshot.pendingWithdrawals);
+    setLoadError(null);
+  };
 
   useEffect(() => {
-    const load = async () => {
-      const snapshot: DashboardSnapshot = await fetchDashboardSnapshot();
-      setStats(snapshot.stats);
-      setOrders(snapshot.orders);
-      setPendingDeposits(snapshot.pendingDeposits);
-      setPendingWithdrawals(snapshot.pendingWithdrawals);
-    };
-
-    load().catch(() => null);
+    loadDashboard().catch((error) => {
+      setLoadError(error instanceof Error ? error.message : "Không thể tải Dashboard.");
+    });
   }, []);
 
   const formatDateTime = (isoString: string | null | undefined) => {
@@ -51,6 +55,23 @@ export default function DashboardPage() {
         </div>
         <div className="badge">Live Supabase</div>
       </div>
+
+      {loadError && (
+        <div className="card" style={{ border: "1px solid #b91c1c" }}>
+          <p style={{ color: "#b91c1c", marginBottom: 12 }}>{loadError}</p>
+          <button
+            className="button secondary"
+            type="button"
+            onClick={() => {
+              loadDashboard().catch((error) => {
+                setLoadError(error instanceof Error ? error.message : "Không thể tải Dashboard.");
+              });
+            }}
+          >
+            Thử lại
+          </button>
+        </div>
+      )}
 
       <div className="grid stats">
         <div className="card">

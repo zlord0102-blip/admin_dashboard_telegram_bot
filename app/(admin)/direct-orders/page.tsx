@@ -78,7 +78,7 @@ export default function DirectOrdersPage() {
       setStatus("Đơn Binance on-chain được xác nhận tự động. Không duyệt tay tại đây.");
       return;
     }
-    if (!confirm(`Duyệt đơn #${order.id} và gửi tài khoản cho user ${order.user_id}?`)) return;
+    if (!confirm(`Duyệt đơn #${order.id} và đưa vào hàng chờ giao tự động cho user ${order.user_id}?`)) return;
     const { data } = await supabase.auth.getSession();
     const token = data.session?.access_token;
     if (!token) {
@@ -98,10 +98,20 @@ export default function DirectOrdersPage() {
       });
       const result = await res.json();
       if (!res.ok) {
+        if (res.status === 409) {
+          await load();
+          setStatus(result.error || `Đơn #${order.id} đã được xử lý trước đó.`);
+          return;
+        }
         setStatus(result.error || "Duyệt thất bại.");
         return;
       }
-      setStatus(`✅ Đã duyệt đơn #${order.id}.`);
+      const deliveryStatus = result?.delivery?.status;
+      if (deliveryStatus === "queued") {
+        setStatus("✅ Đơn đã được duyệt và thêm vào hàng chờ giao tự động.");
+      } else {
+        setStatus(`✅ Đã duyệt đơn #${order.id}.`);
+      }
       await load();
     } catch (error) {
       setStatus("Duyệt thất bại.");

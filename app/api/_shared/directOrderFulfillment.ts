@@ -1,4 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import {
+  buildMissingRequiredRpcMessage,
+  canUseUnsafeMutationFallback
+} from "@/app/api/_shared/mutationFallback";
 
 type RpcLikeResult = Record<string, unknown> | null;
 
@@ -49,6 +53,13 @@ export class DirectOrderFulfillmentError extends Error {
     this.status = status;
   }
 }
+
+const buildMissingRequiredRpcError = (rpcName: string) =>
+  new DirectOrderFulfillmentError(
+    "missing_required_rpc",
+    buildMissingRequiredRpcMessage(rpcName),
+    503
+  );
 
 const normalizeRpcData = (data: unknown): RpcLikeResult => {
   if (Array.isArray(data)) {
@@ -472,6 +483,9 @@ export async function fulfillBotDirectOrder(
     if (!isMissingRpcError(error.message || "")) {
       throw mapRpcError(error.message || "", expireMinutes);
     }
+    if (!canUseUnsafeMutationFallback()) {
+      throw buildMissingRequiredRpcError("fulfill_bot_direct_order");
+    }
     return fulfillBotDirectOrderFallback(supabase, orderId, expireMinutes, orderGroup);
   }
 
@@ -493,6 +507,9 @@ export async function fulfillWebsiteDirectOrder(
   if (error) {
     if (!isMissingRpcError(error.message || "")) {
       throw mapRpcError(error.message || "", expireMinutes);
+    }
+    if (!canUseUnsafeMutationFallback()) {
+      throw buildMissingRequiredRpcError("fulfill_website_direct_order");
     }
     return fulfillWebsiteDirectOrderFallback(supabase, orderId, expireMinutes, orderGroup);
   }

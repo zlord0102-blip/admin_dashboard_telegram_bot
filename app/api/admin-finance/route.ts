@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
+import {
+  buildMissingRequiredRpcMessage,
+  canUseUnsafeMutationFallback
+} from "@/app/api/_shared/mutationFallback";
 
 type FinanceResource = "deposit" | "withdrawal" | "usdt_withdrawal";
 type FinanceAction = "confirm" | "cancel";
@@ -89,6 +93,13 @@ const runRpcAction = async (
 
   if (error) {
     if (isMissingRpcError(error.message || "")) {
+      if (!canUseUnsafeMutationFallback()) {
+        return {
+          ok: false,
+          status: 503,
+          error: buildMissingRequiredRpcMessage(rpcName)
+        };
+      }
       return null;
     }
     const mapped = mapBusinessError(error.message || "");

@@ -32,6 +32,23 @@ const parseBroadcastTitlePresets = (rawValue: string | null | undefined) => {
   }
 };
 
+type TelegramBroadcastJobSnapshot = {
+  id: number;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  totalCandidates: number;
+  totalTargets: number;
+  skippedCount: number;
+  blacklistedCount: number;
+  sentCount: number;
+  failedCount: number;
+  pendingCount: number;
+  sendingCount: number;
+  startedAt: string | null;
+  finishedAt: string | null;
+  lastHeartbeatAt: string | null;
+  lastError: string | null;
+};
+
 export default function UsersPage() {
   const PAGE_SIZE = 50;
   const [users, setUsers] = useState<UserSnapshotRow[]>([]);
@@ -47,6 +64,8 @@ export default function UsersPage() {
   const [sending, setSending] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [presetStatus, setPresetStatus] = useState<string | null>(null);
+  const [broadcastJob, setBroadcastJob] = useState<TelegramBroadcastJobSnapshot | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
@@ -56,6 +75,8 @@ export default function UsersPage() {
   const [userOrdersLoading, setUserOrdersLoading] = useState(false);
   const [userOrdersError, setUserOrdersError] = useState<string | null>(null);
   const deferredSearch = useDeferredValue(search);
+  const broadcastJobActive =
+    broadcastJob?.status === "queued" || broadcastJob?.status === "running";
 
   const load = async (
     pageIndex: number,
@@ -73,6 +94,7 @@ export default function UsersPage() {
     setUsers(snapshot.users);
     setTotalCount(snapshot.totalCount);
     setTotalPages(snapshot.totalPages);
+    setLoadError(null);
   };
 
   const loadBroadcastTitlePresets = async () => {
@@ -116,6 +138,7 @@ export default function UsersPage() {
       setUsers([]);
       setTotalCount(0);
       setTotalPages(1);
+      setLoadError("Không thể tải danh sách user.");
     });
   }, [page, deferredSearch, filterMode, sortMode]);
 
@@ -139,6 +162,71 @@ export default function UsersPage() {
     }
     setBroadcastTitleDraft(broadcastTitlePresets[selectedBroadcastTitleIndex] || "");
   }, [selectedBroadcastTitleIndex, broadcastTitlePresets]);
+
+  useEffect(() => {
+    if (!broadcastJobActive || !broadcastJob?.id) {
+      return;
+    }
+
+    let active = true;
+    const loadJob = async () => {
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      if (!token) {
+        return;
+      }
+
+      const res = await fetch(`/api/telegram/broadcast-jobs/${broadcastJob.id}`, {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+      const result = await res.json();
+      if (!active || !res.ok || !result?.job) {
+        return;
+      }
+
+      const nextJob = result.job as TelegramBroadcastJobSnapshot;
+      setBroadcastJob(nextJob);
+
+      const total = nextJob.totalTargets || 0;
+      if (nextJob.status === "completed") {
+        const parts = [`✅ Job #${nextJob.id} hoàn tất ${nextJob.sentCount}/${total}.`];
+        if (nextJob.skippedCount) {
+          parts.push(`Bỏ qua: ${nextJob.skippedCount}.`);
+        }
+        if (nextJob.blacklistedCount) {
+          parts.push(`Đánh dấu chat lỗi vĩnh viễn: ${nextJob.blacklistedCount}.`);
+        }
+        if (nextJob.failedCount) {
+          parts.push(`Lỗi còn lại: ${nextJob.failedCount}.`);
+        }
+        setStatus(parts.join(" "));
+        return;
+      }
+
+      if (nextJob.status === "failed") {
+        setStatus(
+          `⚠️ Job #${nextJob.id} thất bại sau ${nextJob.sentCount}/${total}. ${nextJob.lastError || ""}`.trim()
+        );
+        return;
+      }
+
+      setStatus(
+        `⏳ Job #${nextJob.id}: ${nextJob.sentCount}/${total} đã gửi, ${nextJob.failedCount} lỗi, ${nextJob.pendingCount + nextJob.sendingCount} còn lại.`
+      );
+    };
+
+    loadJob().catch(() => undefined);
+    const timer = window.setInterval(() => {
+      loadJob().catch(() => undefined);
+    }, 1500);
+
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [broadcastJob?.id, broadcastJobActive]);
 
   const formatDateTime = (isoString: string | null | undefined) => {
     if (!isoString) return "-";
@@ -180,6 +268,13 @@ export default function UsersPage() {
         return;
       }
       if (payload.broadcast) {
+        if (result?.queued && result?.job) {
+          setBroadcastJob(result.job as TelegramBroadcastJobSnapshot);
+          setStatus(
+            `⏳ Đã tạo job broadcast #${result.job.id}. Snapshot: ${result.attempted}/${result.total} user đủ điều kiện.`
+          );
+          return;
+        }
         const parts = [`✅ Đã gửi ${result.success}/${result.attempted ?? result.total}.`];
         if (result.skipped) {
           parts.push(`Bỏ qua: ${result.skipped}.`);
@@ -209,6 +304,10 @@ export default function UsersPage() {
     : broadcastMessage.trim();
 
   const handleBroadcast = async () => {
+    if (broadcastJobActive) {
+      setStatus(`Broadcast job #${broadcastJob?.id} vẫn đang chạy.`);
+      return;
+    }
     if (!finalBroadcastMessage) {
       setStatus("Nhập nội dung broadcast trước khi gửi.");
       return;
@@ -399,8 +498,13 @@ export default function UsersPage() {
               value={broadcastMessage}
               onChange={(event) => setBroadcastMessage(event.target.value)}
             />
-            <button className="button" type="button" disabled={sending} onClick={handleBroadcast}>
-              {sending ? "Đang gửi..." : "Gửi tất cả"}
+            <button
+              className="button"
+              type="button"
+              disabled={sending || broadcastJobActive}
+              onClick={handleBroadcast}
+            >
+              {sending ? "Đang tạo job..." : broadcastJobActive ? "Job đang chạy..." : "Gửi tất cả"}
             </button>
           </div>
         </div>
@@ -408,6 +512,22 @@ export default function UsersPage() {
       </div>
 
       <div className="card">
+        {loadError && (
+          <div style={{ marginBottom: 12 }}>
+            <p style={{ color: "#b91c1c", marginBottom: 8 }}>{loadError}</p>
+            <button
+              className="button secondary"
+              type="button"
+              onClick={() => {
+                load(page, deferredSearch, filterMode, sortMode).catch(() => {
+                  setLoadError("Không thể tải danh sách user.");
+                });
+              }}
+            >
+              Thử lại
+            </button>
+          </div>
+        )}
         <table className="table">
           <thead>
             <tr>
@@ -645,13 +765,18 @@ export default function UsersPage() {
               <button
                 className="button secondary"
                 type="button"
-                disabled={sending}
+                disabled={sending || broadcastJobActive}
                 onClick={() => setBroadcastConfirmOpen(false)}
               >
                 Hủy
               </button>
-              <button className="button" type="button" disabled={sending} onClick={handleConfirmBroadcast}>
-                {sending ? "Đang gửi..." : "Xác nhận gửi"}
+              <button
+                className="button"
+                type="button"
+                disabled={sending || broadcastJobActive}
+                onClick={handleConfirmBroadcast}
+              >
+                {sending ? "Đang tạo job..." : broadcastJobActive ? "Job đang chạy..." : "Xác nhận gửi"}
               </button>
             </div>
           </div>

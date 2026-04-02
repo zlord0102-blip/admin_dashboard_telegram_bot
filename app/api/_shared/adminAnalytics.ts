@@ -8,6 +8,24 @@ export type DashboardStats = {
   revenue: number;
 };
 
+export type DashboardCheckerState = "healthy" | "warning" | "error" | "unknown";
+
+export type DashboardCheckerHealth = {
+  state: DashboardCheckerState;
+  heartbeatAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  mode: string | null;
+  intervalSeconds: number;
+  sleepSeconds: number;
+  lastDurationMs: number | null;
+  runtime: string | null;
+  outboxPending: number;
+  outboxSending: number;
+  outboxFailed: number;
+  outboxAvailable: boolean;
+};
+
 export type DashboardOrderRow = {
   id: number;
   user_id: number;
@@ -24,6 +42,7 @@ export type DashboardSnapshot = {
   stats: DashboardStats;
   pendingDeposits: number;
   pendingWithdrawals: number;
+  checkerHealth: DashboardCheckerHealth;
   orders: DashboardOrderRow[];
 };
 
@@ -160,6 +179,7 @@ type UserProfileSummary = {
 const TZ = "Asia/Ho_Chi_Minh";
 const HO_CHI_MINH_OFFSET_MS = 7 * 60 * 60 * 1000;
 const MONTH_KEY_PATTERN = /^(\d{4})-(\d{2})$/;
+const CHECKER_HEALTH_SETTING_KEY = "bot_checker_health";
 
 const normalizeRpcData = (data: unknown): RpcObject => {
   if (Array.isArray(data)) {
@@ -174,6 +194,15 @@ const isMissingRpcError = (message: string) => {
     lowered.includes("could not find the function") ||
     lowered.includes("schema cache") ||
     lowered.includes("pgrst202")
+  );
+};
+
+const isMissingRelationError = (message: string) => {
+  const lowered = message.toLowerCase();
+  return (
+    (lowered.includes("relation") && lowered.includes("does not exist")) ||
+    lowered.includes("could not find the table") ||
+    lowered.includes("schema cache")
   );
 };
 
@@ -307,6 +336,103 @@ const compareUserRows = (left: UserSnapshotRow, right: UserSnapshotRow, sortMode
 
 const toObjectArray = (value: unknown) =>
   Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => !!item && typeof item === "object") : [];
+
+const createDefaultCheckerHealth = (): DashboardCheckerHealth => ({
+  state: "unknown",
+  heartbeatAt: null,
+  lastSuccessAt: null,
+  lastError: null,
+  mode: null,
+  intervalSeconds: 30,
+  sleepSeconds: 30,
+  lastDurationMs: null,
+  runtime: null,
+  outboxPending: 0,
+  outboxSending: 0,
+  outboxFailed: 0,
+  outboxAvailable: false
+});
+
+const computeCheckerState = (
+  heartbeatAt: string | null,
+  intervalSeconds: number,
+  lastError: string | null
+): DashboardCheckerState => {
+  if (!heartbeatAt) {
+    return lastError ? "error" : "unknown";
+  }
+  const heartbeatTime = new Date(heartbeatAt).getTime();
+  if (!Number.isFinite(heartbeatTime)) {
+    return lastError ? "error" : "unknown";
+  }
+  const staleAfterMs = Math.max(30_000, Math.max(1, intervalSeconds) * 3 * 1000 + 20_000);
+  if (Date.now() - heartbeatTime > staleAfterMs) {
+    return "error";
+  }
+  if (lastError) {
+    return "warning";
+  }
+  return "healthy";
+};
+
+const parseCheckerHealthSetting = (rawValue: unknown) => {
+  const text = toOptionalString(rawValue);
+  if (!text) {
+    return {} as Record<string, unknown>;
+  }
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+};
+
+async function loadDashboardCheckerHealth(supabase: SupabaseClient): Promise<DashboardCheckerHealth> {
+  const base = createDefaultCheckerHealth();
+
+  const [{ data: settingData, error: settingError }, pendingRes, sendingRes, failedRes] = await Promise.all([
+    supabase.from("settings").select("value").eq("key", CHECKER_HEALTH_SETTING_KEY).maybeSingle(),
+    supabase.from("bot_delivery_outbox").select("id", { count: "exact", head: true }).eq("status", "pending"),
+    supabase.from("bot_delivery_outbox").select("id", { count: "exact", head: true }).eq("status", "sending"),
+    supabase.from("bot_delivery_outbox").select("id", { count: "exact", head: true }).eq("status", "failed")
+  ]);
+
+  if (settingError) {
+    throw new Error(settingError.message || "Không thể tải trạng thái checker.");
+  }
+
+  const outboxErrors = [pendingRes.error, sendingRes.error, failedRes.error].filter(Boolean);
+  const outboxMissing = outboxErrors.every((error) => isMissingRelationError(error?.message || ""));
+  if (outboxErrors.length && !outboxMissing) {
+    throw new Error(outboxErrors[0]?.message || "Không thể tải trạng thái outbox.");
+  }
+
+  const rawHealth = parseCheckerHealthSetting(settingData?.value);
+  const heartbeatAt = toOptionalString(rawHealth.heartbeatAt);
+  const lastSuccessAt = toOptionalString(rawHealth.lastSuccessAt);
+  const lastError = toOptionalString(rawHealth.lastError);
+  const intervalSeconds = Math.max(1, toNumber(rawHealth.intervalSeconds, 30));
+  const sleepSeconds = Math.max(1, toNumber(rawHealth.sleepSeconds, intervalSeconds));
+
+  return {
+    state: computeCheckerState(heartbeatAt, intervalSeconds, lastError),
+    heartbeatAt,
+    lastSuccessAt,
+    lastError,
+    mode: toOptionalString(rawHealth.mode),
+    intervalSeconds,
+    sleepSeconds,
+    lastDurationMs: rawHealth.lastDurationMs == null ? null : toNumber(rawHealth.lastDurationMs),
+    runtime: toOptionalString(rawHealth.runtime),
+    outboxPending: outboxMissing ? 0 : pendingRes.count ?? 0,
+    outboxSending: outboxMissing ? 0 : sendingRes.count ?? 0,
+    outboxFailed: outboxMissing ? 0 : failedRes.count ?? 0,
+    outboxAvailable: !outboxMissing
+  };
+};
 
 const calcDeltaPercent = (current: number, previous: number) => {
   if (previous <= 0) return current > 0 ? 100 : 0;
@@ -534,6 +660,7 @@ const normalizeDashboardSnapshot = (data: RpcObject): DashboardSnapshot => {
     },
     pendingDeposits: toNumber(data?.pendingDeposits),
     pendingWithdrawals: toNumber(data?.pendingWithdrawals),
+    checkerHealth: createDefaultCheckerHealth(),
     orders: toObjectArray(data?.orders).map((row) => ({
       id: toNumber(row.id),
       user_id: toNumber(row.user_id),
@@ -727,6 +854,7 @@ async function loadDashboardFallback(supabase: SupabaseClient): Promise<Dashboar
     },
     pendingDeposits: depositsRes.count ?? 0,
     pendingWithdrawals: withdrawalsRes.count ?? 0,
+    checkerHealth: createDefaultCheckerHealth(),
     orders: orderRows.map((row) => ({
       id: toNumber(row.id),
       user_id: toNumber(row.user_id),
@@ -1394,6 +1522,8 @@ export async function getDashboardSnapshot(supabase: SupabaseClient): Promise<Da
     snapshot = normalizeDashboardSnapshot(normalizeRpcData(data));
   }
 
+  const checkerHealthPromise = loadDashboardCheckerHealth(supabase);
+
   const missingProfileIds = Array.from(
     new Set(
       snapshot.orders
@@ -1403,13 +1533,20 @@ export async function getDashboardSnapshot(supabase: SupabaseClient): Promise<Da
     )
   );
   if (!missingProfileIds.length) {
-    return snapshot;
+    return {
+      ...snapshot,
+      checkerHealth: await checkerHealthPromise
+    };
   }
 
-  const userProfilesById = await loadUserProfilesByIds(supabase, missingProfileIds);
+  const [userProfilesById, checkerHealth] = await Promise.all([
+    loadUserProfilesByIds(supabase, missingProfileIds),
+    checkerHealthPromise
+  ]);
 
   return {
     ...snapshot,
+    checkerHealth,
     orders: snapshot.orders.map((order) => ({
       ...order,
       username: userProfilesById.get(String(order.user_id))?.username ?? order.username ?? null,

@@ -12,6 +12,24 @@ export type DashboardStats = {
   revenue: number;
 };
 
+export type DashboardCheckerState = "healthy" | "warning" | "error" | "unknown";
+
+export type DashboardCheckerHealth = {
+  state: DashboardCheckerState;
+  heartbeatAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  mode: string | null;
+  intervalSeconds: number;
+  sleepSeconds: number;
+  lastDurationMs: number | null;
+  runtime: string | null;
+  outboxPending: number;
+  outboxSending: number;
+  outboxFailed: number;
+  outboxAvailable: boolean;
+};
+
 export type DashboardOrderRow = {
   id: number;
   user_id: number;
@@ -28,6 +46,7 @@ export type DashboardSnapshot = {
   stats: DashboardStats;
   pendingDeposits: number;
   pendingWithdrawals: number;
+  checkerHealth: DashboardCheckerHealth;
   orders: DashboardOrderRow[];
 };
 
