@@ -23,7 +23,7 @@ export async function GET(request: NextRequest) {
   const pageSize = Number.isFinite(pageSizeParam) ? pageSizeParam : 50;
 
   try {
-    const cacheKey = `admin-analytics:users:v3:${page}:${pageSize}:${search.trim().toLowerCase()}:${filter.trim().toLowerCase()}:${sort.trim().toLowerCase()}`;
+    const cacheKey = `admin-analytics:users:v4:${page}:${pageSize}:${search.trim().toLowerCase()}:${filter.trim().toLowerCase()}:${sort.trim().toLowerCase()}`;
     const analyticsStartedAt = performance.now();
     const { value: data, hit } = await getOrSetServerCache(cacheKey, USERS_CACHE_TTL_MS, () =>
       getUsersSnapshot(adminSession.supabase, {

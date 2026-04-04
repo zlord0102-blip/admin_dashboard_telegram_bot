@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
+import { AdminSessionProvider, type AdminSessionSnapshot } from "@/components/AdminSessionContext";
+import { AdminSessionClientError, fetchAdminSessionSnapshot } from "@/lib/adminSessionClient";
 
 const navItems = [
   { href: "/", label: "Dashboard" },
@@ -25,7 +27,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const [role, setRole] = useState<string | null>(null);
+  const [adminSession, setAdminSession] = useState<AdminSessionSnapshot | null>(null);
   const [email, setEmail] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const [accessDenied, setAccessDenied] = useState(false);
@@ -33,29 +35,34 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const loadSession = async () => {
-      const { data } = await supabase.auth.getSession();
-      const session = data.session;
-      if (!session) {
-        router.replace("/login");
-        return;
-      }
-      setEmail(session.user.email ?? null);
-      setUserId(session.user.id);
-      const { data: adminRow, error } = await supabase
-        .from("admin_users")
-        .select("role")
-        .eq("user_id", session.user.id)
-        .maybeSingle();
+      try {
+        const { data } = await supabase.auth.getSession();
+        const session = data.session;
+        if (!session) {
+          router.replace("/login");
+          return;
+        }
 
-      if (error) {
-        setAccessError(error.message);
+        setEmail(session.user.email ?? null);
+        setUserId(session.user.id);
+
+        const nextAdminSession = await fetchAdminSessionSnapshot(session.access_token);
+        setAdminSession(nextAdminSession);
+        setEmail(nextAdminSession.email ?? session.user.email ?? null);
+        setUserId(nextAdminSession.userId || session.user.id);
+        setAccessDenied(false);
+        setAccessError(null);
+      } catch (error) {
+        if (error instanceof AdminSessionClientError && error.status === 401) {
+          router.replace("/login");
+          return;
+        }
+        setAdminSession(null);
         setAccessDenied(true);
-      } else if (!adminRow) {
-        setAccessDenied(true);
-      } else {
-        setRole(adminRow.role);
+        setAccessError(error instanceof Error ? error.message : "Không thể tải phiên admin.");
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     };
 
     loadSession();
@@ -143,7 +150,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
               {email ?? "admin"}
             </div>
             <div style={{ marginTop: 6 }} className="badge">
-              {role ?? "admin"}
+              {adminSession?.role ?? "admin"}
             </div>
             <button className="button secondary" style={{ marginTop: 12 }} onClick={handleSignOut}>
               Đăng xuất
@@ -152,7 +159,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         </div>
       </aside>
       <main className="main">
-        {children}
+        {adminSession ? <AdminSessionProvider value={adminSession}>{children}</AdminSessionProvider> : children}
       </main>
     </div>
   );

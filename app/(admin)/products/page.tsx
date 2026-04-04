@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
+import { useAdminSession } from "@/components/AdminSessionContext";
 
 interface PriceTier {
   min_quantity: number;
@@ -103,10 +104,10 @@ type PositionShiftRow = {
 };
 
 export default function ProductsPage() {
+  const adminSession = useAdminSession();
   const [products, setProducts] = useState<Product[]>([]);
   const [productListTab, setProductListTab] = useState<ProductListTab>("visible");
   const [formatTemplates, setFormatTemplates] = useState<FormatTemplate[]>([]);
-  const [role, setRole] = useState<string | null>(null);
   const [productError, setProductError] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [price, setPrice] = useState("");
@@ -201,22 +202,9 @@ export default function ProductsPage() {
     setFormatTemplates((data as FormatTemplate[]) || []);
   };
 
-  const loadRole = async () => {
-    const { data } = await supabase.auth.getSession();
-    const session = data.session;
-    if (!session) return;
-    const { data: adminRow } = await supabase
-      .from("admin_users")
-      .select("role")
-      .eq("user_id", session.user.id)
-      .maybeSingle();
-    setRole(adminRow?.role ?? null);
-  };
-
   useEffect(() => {
     load();
     loadFormats();
-    loadRole();
   }, []);
 
   const visibleProducts = useMemo(
@@ -763,7 +751,7 @@ export default function ProductsPage() {
         </table>
       </div>
 
-      {role === "superadmin" && (
+              {adminSession?.role === "superadmin" && (
         <div className="card">
           <h3 className="section-title">Format templates</h3>
           <form className="form-grid" onSubmit={handleAddTemplate}>

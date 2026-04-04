@@ -1572,26 +1572,35 @@ export async function getUsersSnapshot(
   const filterMode = normalizeUsersFilterMode(params.filterMode);
   const sortMode = normalizeUsersSortMode(params.sortMode);
 
-  if (filterMode !== "all" || sortMode !== "newest") {
-    return loadUsersFilteredSortedFallback(
-      supabase,
-      safePage,
-      safePageSize,
-      keyword,
-      filterMode,
-      sortMode
-    );
-  }
-
-  const { data, error } = await supabase.rpc("admin_bot_users_snapshot_page", {
+  const v2Result = await supabase.rpc("admin_bot_users_snapshot_page_v2", {
     p_page: safePage,
     p_page_size: safePageSize,
-    p_search: keyword || null
+    p_search: keyword || null,
+    p_filter: filterMode,
+    p_sort: sortMode
   });
 
-  if (error) {
-    if (!isMissingRpcError(error.message || "")) {
-      throw new Error(error.message || "Không thể tải users snapshot.");
+  if (!v2Result.error) {
+    return normalizeUsersSnapshot(normalizeRpcData(v2Result.data));
+  }
+
+  if (!isMissingRpcError(v2Result.error.message || "")) {
+    throw new Error(v2Result.error.message || "Không thể tải users snapshot.");
+  }
+
+  if (filterMode === "all" && sortMode === "newest") {
+    const legacyRpcResult = await supabase.rpc("admin_bot_users_snapshot_page", {
+      p_page: safePage,
+      p_page_size: safePageSize,
+      p_search: keyword || null
+    });
+
+    if (!legacyRpcResult.error) {
+      return normalizeUsersSnapshot(normalizeRpcData(legacyRpcResult.data));
+    }
+
+    if (!isMissingRpcError(legacyRpcResult.error.message || "")) {
+      throw new Error(legacyRpcResult.error.message || "Không thể tải users snapshot.");
     }
 
     if (!keyword) {
@@ -1601,5 +1610,12 @@ export async function getUsersSnapshot(
     return loadUsersSearchFallback(supabase, safePage, safePageSize, keyword);
   }
 
-  return normalizeUsersSnapshot(normalizeRpcData(data));
+  return loadUsersFilteredSortedFallback(
+    supabase,
+    safePage,
+    safePageSize,
+    keyword,
+    filterMode,
+    sortMode
+  );
 }

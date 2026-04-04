@@ -23,6 +23,9 @@ type AdminSessionSuccess = {
   ok: true;
   supabase: SupabaseClient;
   token: string;
+  userId: string;
+  email: string | null;
+  role: string;
 };
 
 type AdminSessionFailure = {
@@ -41,6 +44,28 @@ const isUnauthorizedAuthError = (message: string) => {
     lowered.includes("auth session missing") ||
     lowered.includes("expired")
   );
+};
+
+const toOptionalString = (value: unknown) => {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+};
+
+const decodeJwtClaims = (token: string) => {
+  try {
+    const [, payload] = token.split(".");
+    if (!payload) return {} as Record<string, unknown>;
+    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padding = "=".repeat((4 - (normalized.length % 4)) % 4);
+    const json = Buffer.from(normalized + padding, "base64").toString("utf8");
+    const parsed = JSON.parse(json);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {} as Record<string, unknown>;
+  }
 };
 
 export async function requireAdminSession(request: NextRequest): Promise<AdminSessionResult> {
@@ -63,7 +88,7 @@ export async function requireAdminSession(request: NextRequest): Promise<AdminSe
   const supabase = buildSupabaseClient(token);
   const { data: adminRow, error: adminError } = await supabase
     .from("admin_users")
-    .select("role")
+    .select("user_id, role")
     .maybeSingle();
 
   if (adminError) {
@@ -83,9 +108,22 @@ export async function requireAdminSession(request: NextRequest): Promise<AdminSe
     };
   }
 
+  const claims = decodeJwtClaims(token);
+  const userId = toOptionalString(adminRow.user_id) ?? toOptionalString(claims.sub);
+  const role = toOptionalString(adminRow.role) ?? "admin";
+  if (!userId) {
+    return {
+      ok: false,
+      response: NextResponse.json({ error: "Unauthorized." }, { status: 401 })
+    };
+  }
+
   return {
     ok: true,
     supabase,
-    token
+    token,
+    userId,
+    email: toOptionalString(claims.email),
+    role
   };
 }
