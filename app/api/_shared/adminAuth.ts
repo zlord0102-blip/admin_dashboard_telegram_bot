@@ -1,11 +1,13 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { NextRequest, NextResponse } from "next/server";
+import { getSupabaseAdminClient } from "@/app/api/_shared/supabaseAdmin";
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
+const supabasePublishableKey =
+  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 
 export const buildSupabaseClient = (token?: string) =>
-  createClient(supabaseUrl, supabaseAnonKey, {
+  createClient(supabaseUrl, supabasePublishableKey, {
     auth: {
       persistSession: false,
       autoRefreshToken: false
@@ -35,17 +37,6 @@ type AdminSessionFailure = {
 
 export type AdminSessionResult = AdminSessionSuccess | AdminSessionFailure;
 
-const isUnauthorizedAuthError = (message: string) => {
-  const lowered = message.toLowerCase();
-  return (
-    lowered.includes("jwt") ||
-    lowered.includes("token") ||
-    lowered.includes("authorization") ||
-    lowered.includes("auth session missing") ||
-    lowered.includes("expired")
-  );
-};
-
 const toOptionalString = (value: unknown) => {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -69,7 +60,7 @@ const decodeJwtClaims = (token: string) => {
 };
 
 export async function requireAdminSession(request: NextRequest): Promise<AdminSessionResult> {
-  if (!supabaseUrl || !supabaseAnonKey) {
+  if (!supabaseUrl || !supabasePublishableKey) {
     return {
       ok: false,
       response: NextResponse.json({ error: "Supabase env missing." }, { status: 500 })
@@ -85,31 +76,39 @@ export async function requireAdminSession(request: NextRequest): Promise<AdminSe
     };
   }
 
+  const authClient = buildSupabaseClient();
+  const { data: userData, error: userError } = await authClient.auth.getUser(token);
+  if (userError || !userData.user) {
+    return {
+      ok: false,
+      response: NextResponse.json({ error: "Unauthorized." }, { status: 401 })
+    };
+  }
+
+  const userId = userData.user.id;
   const supabase = buildSupabaseClient(token);
-  const { data: adminRow, error: adminError } = await supabase
+  const adminSupabase = getSupabaseAdminClient();
+  const { data: adminRow, error: adminError } = await adminSupabase
     .from("admin_users")
     .select("user_id, role")
+    .eq("user_id", userId)
     .maybeSingle();
 
   if (adminError) {
     return {
       ok: false,
-      response: NextResponse.json(
-        { error: isUnauthorizedAuthError(adminError.message || "") ? "Unauthorized." : "Forbidden." },
-        { status: isUnauthorizedAuthError(adminError.message || "") ? 401 : 403 }
-      )
+      response: NextResponse.json({ error: adminError.message || "Không thể kiểm tra quyền admin." }, { status: 500 })
     };
   }
 
   if (!adminRow) {
     return {
       ok: false,
-      response: NextResponse.json({ error: "Forbidden." }, { status: 403 })
+      response: NextResponse.json({ error: "Tài khoản này chưa được cấp quyền admin." }, { status: 403 })
     };
   }
 
   const claims = decodeJwtClaims(token);
-  const userId = toOptionalString(adminRow.user_id) ?? toOptionalString(claims.sub);
   const role = toOptionalString(adminRow.role) ?? "admin";
   if (!userId) {
     return {
@@ -123,7 +122,7 @@ export async function requireAdminSession(request: NextRequest): Promise<AdminSe
     supabase,
     token,
     userId,
-    email: toOptionalString(claims.email),
+    email: userData.user.email ?? toOptionalString(claims.email),
     role
   };
 }

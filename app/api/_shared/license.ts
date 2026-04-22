@@ -58,6 +58,14 @@ type RpcPublicResult = {
   expires_at?: string | null;
 };
 
+type SanitizedErrorLog = {
+  name?: string;
+  code?: string;
+  message?: string;
+  details?: string;
+  hint?: string;
+};
+
 const LICENSE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const toTrimmedString = (value: unknown) => String(value || "").trim();
 
@@ -166,6 +174,39 @@ export const getRequestIp = (request: NextRequest) => {
     .find(Boolean);
   return firstForwarded || request.headers.get("x-real-ip") || null;
 };
+
+const getErrorField = (error: unknown, field: keyof SanitizedErrorLog) => {
+  if (!error || typeof error !== "object") return undefined;
+  const value = (error as Record<string, unknown>)[field];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+};
+
+export const sanitizeErrorForLog = (error: unknown): SanitizedErrorLog => {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message
+    };
+  }
+
+  return {
+    name: getErrorField(error, "name"),
+    code: getErrorField(error, "code"),
+    message: getErrorField(error, "message"),
+    details: getErrorField(error, "details"),
+    hint: getErrorField(error, "hint")
+  };
+};
+
+export const logLicenseServiceError = (scope: string, error: unknown) => {
+  console.error(`[${scope}] License service error`, sanitizeErrorForLog(error));
+};
+
+export const getLicenseServiceUnavailableBody = () => ({
+  success: false,
+  code: "license_service_unavailable",
+  error: "Dịch vụ license tạm thời không khả dụng. Vui lòng thử lại sau."
+});
 
 const mapExtensionsById = (rows: LicenseExtensionRow[]) =>
   new Map(rows.map((row) => [row.id, row]));

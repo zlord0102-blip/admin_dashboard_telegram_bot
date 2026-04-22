@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdminClient } from "@/app/api/_shared/supabaseAdmin";
+import { checkRateLimit, getClientIp } from "@/app/api/_shared/rateLimit";
 import {
   generateActivationToken,
+  getLicenseServiceUnavailableBody,
   getRequestIp,
+  logLicenseServiceError,
   normalizeExtensionCode,
   normalizeFingerprint,
   normalizeLicenseKey,
@@ -35,6 +38,17 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const rateLimit = checkRateLimit(`licenses:activate:${getClientIp(request)}:${extensionCode}`, {
+    windowMs: 60_000,
+    max: 30
+  });
+  if (rateLimit.limited) {
+    return NextResponse.json(
+      { error: "Too many activation attempts. Please retry later." },
+      { status: 429, headers: { "Retry-After": String(rateLimit.retryAfterSeconds) } }
+    );
+  }
+
   try {
     const activationToken = generateActivationToken();
     const data = await runActivateLicenseRpc(getSupabaseAdminClient(), {
@@ -57,9 +71,7 @@ export async function POST(request: NextRequest) {
         : data
     });
   } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Không thể kích hoạt license." },
-      { status: 500 }
-    );
+    logLicenseServiceError("licenses.activate", error);
+    return NextResponse.json(getLicenseServiceUnavailableBody(), { status: 503 });
   }
 }

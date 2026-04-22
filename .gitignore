@@ -1,2 +1,15 @@
 node_modules/
 .next/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Local scratch / generated artifacts
+123.txt
+*.log
+*.db
+*.sqlite
+*.sqlite3
+*.tsbuildinfo

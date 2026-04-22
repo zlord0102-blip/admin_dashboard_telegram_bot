@@ -153,7 +153,7 @@ export async function POST(request: NextRequest) {
       jobsReady = false;
     }
 
-    const backgroundReady = jobsReady && Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY);
+    const backgroundReady = jobsReady && Boolean(process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY);
 
     if (backgroundReady) {
       try {
@@ -179,7 +179,7 @@ export async function POST(request: NextRequest) {
           return NextResponse.json(
             {
               error:
-                "Broadcast job chưa sẵn sàng. Hãy apply SQL mới và cấu hình SUPABASE_SERVICE_ROLE_KEY trước khi gửi."
+                "Broadcast job chưa sẵn sàng. Hãy apply SQL mới và cấu hình SUPABASE_SECRET_KEY trước khi gửi."
             },
             { status: 503 }
           );
@@ -189,7 +189,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         {
           error:
-            "Broadcast job chưa sẵn sàng. Hãy apply SQL mới và cấu hình SUPABASE_SERVICE_ROLE_KEY trước khi gửi."
+            "Broadcast job chưa sẵn sàng. Hãy apply SQL mới và cấu hình SUPABASE_SECRET_KEY trước khi gửi."
         },
         { status: 503 }
       );
