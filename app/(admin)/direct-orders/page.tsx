@@ -25,6 +25,8 @@ interface DirectOrderRow {
   external_payment_id?: string | null;
   external_tx_id?: string | null;
   external_paid_at?: string | null;
+  binance_pay_prepay_id?: string | null;
+  binance_pay_status?: string | null;
   products?: {
     name: string;
   }[] | null;
@@ -52,7 +54,7 @@ export default function DirectOrdersPage() {
   const load = async () => {
     let query = supabase
       .from("direct_orders")
-      .select("id, user_id, product_id, quantity, bonus_quantity, unit_price, amount, code, status, created_at, payment_channel, payment_asset, payment_network, payment_amount_asset, payment_address, payment_address_tag, external_payment_id, external_tx_id, external_paid_at, products(name)")
+      .select("id, user_id, product_id, quantity, bonus_quantity, unit_price, amount, code, status, created_at, payment_channel, payment_asset, payment_network, payment_amount_asset, payment_address, payment_address_tag, external_payment_id, external_tx_id, external_paid_at, binance_pay_prepay_id, binance_pay_status, products(name)")
       .order("created_at", { ascending: false })
       .limit(200);
     if (statusFilter !== "all") {
@@ -77,13 +79,16 @@ export default function DirectOrdersPage() {
 
   const filtered = useMemo(() => orders, [orders]);
   const paymentChannelLabel = (channel: string | null | undefined) => {
+    if (channel === "binance_pay") return "Binance Pay";
     if (channel === "binance_onchain") return "Binance";
     return "VietQR";
   };
+  const isAutoConfirmChannel = (channel: string | null | undefined) =>
+    channel === "binance_onchain" || channel === "binance_pay";
 
   const handleApprove = async (order: DirectOrderRow) => {
-    if (order.payment_channel === "binance_onchain") {
-      setStatus("Đơn Binance on-chain được xác nhận tự động. Không duyệt tay tại đây.");
+    if (isAutoConfirmChannel(order.payment_channel)) {
+      setStatus("Đơn Binance được xác nhận tự động qua checker/webhook. Không duyệt tay tại đây.");
       return;
     }
     const { data } = await supabase.auth.getSession();
@@ -163,7 +168,7 @@ export default function DirectOrdersPage() {
       <div className="topbar">
         <div>
           <h1 className="page-title">Direct Orders</h1>
-          <p className="muted">Theo dõi đơn thanh toán trực tiếp. VietQR có thể duyệt tay; Binance on-chain được xác nhận tự động.</p>
+          <p className="muted">Theo dõi đơn thanh toán trực tiếp. VietQR có thể duyệt tay; Binance on-chain và Binance Pay Merchant được xác nhận tự động.</p>
         </div>
       </div>
 
@@ -214,11 +219,11 @@ export default function DirectOrdersPage() {
                 <td>{order.amount?.toLocaleString?.() ?? order.amount}</td>
                 <td>{paymentChannelLabel(order.payment_channel)}</td>
                 <td style={{ maxWidth: 280 }}>
-                  {order.payment_channel === "binance_onchain" ? (
+                  {isAutoConfirmChannel(order.payment_channel) ? (
                     <div className="muted">
                       <div>{order.payment_amount_asset || "-"} {order.payment_asset || ""}</div>
-                      <div>{order.payment_network || "-"}</div>
-                      <div>{order.external_tx_id || order.external_payment_id || "Chưa có tx"}</div>
+                      <div>{order.payment_channel === "binance_pay" ? "Merchant" : (order.payment_network || "-")}</div>
+                      <div>{order.binance_pay_status || order.external_tx_id || order.external_payment_id || order.binance_pay_prepay_id || "Chưa có tx"}</div>
                     </div>
                   ) : (
                     <span className="muted">-</span>
@@ -233,8 +238,8 @@ export default function DirectOrdersPage() {
                       order.status === "pending"
                         ? [
                             {
-                              label: order.payment_channel === "binance_onchain" ? "Tự động" : "Duyệt",
-                              disabled: sendingId === order.id || order.payment_channel === "binance_onchain",
+                              label: isAutoConfirmChannel(order.payment_channel) ? "Tự động" : "Duyệt",
+                              disabled: sendingId === order.id || isAutoConfirmChannel(order.payment_channel),
                               onSelect: () => setPendingAction({ type: "approve", order })
                             },
                             {

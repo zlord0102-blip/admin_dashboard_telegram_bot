@@ -1,6 +1,12 @@
 "use client";
 
+import type {
+  BinancePayWebhookAlert,
+  BinancePayWebhookHealth
+} from "@/lib/binancePayWebhookAlerts";
 import { supabase } from "@/lib/supabaseClient";
+
+export type { BinancePayWebhookAlert, BinancePayWebhookHealth };
 
 export type AdminOpsHealth = {
   checkedAt: string;
@@ -30,6 +36,9 @@ export type AdminOpsHealth = {
     count: number;
     items: Array<{ id: number; name: string; availableStock: number }>;
   };
+  checkerHealth?: Record<string, unknown>;
+  binancePayWebhook?: BinancePayWebhookHealth | null;
+  binancePayWebhookAlerts?: BinancePayWebhookAlert[];
 };
 
 export type AdminAuditLogRow = {

@@ -274,8 +274,12 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
   const healthTone =
     !opsHealth ? "unknown"
-    : opsHealth.queues.deliveryOutbox.failed > 0 || opsHealth.queues.pendingDirectOrdersExpired > 0 ? "danger"
-    : opsHealth.stock.count > 0 || opsHealth.queues.deliveryOutbox.retryDue > 0 ? "warning"
+    : opsHealth.queues.deliveryOutbox.failed > 0 ||
+      opsHealth.queues.pendingDirectOrdersExpired > 0 ||
+      (opsHealth.binancePayWebhookAlerts || []).some((alert) => alert.severity === "critical") ? "danger"
+    : opsHealth.stock.count > 0 ||
+      opsHealth.queues.deliveryOutbox.retryDue > 0 ||
+      (opsHealth.binancePayWebhookAlerts || []).some((alert) => alert.severity === "warning") ? "warning"
     : "healthy";
 
   const totalPending = opsHealth

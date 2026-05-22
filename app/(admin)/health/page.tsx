@@ -27,6 +27,12 @@ const formatDateTime = (value: string | null | undefined) => {
 const flattenChecks = (records: Record<string, boolean>) =>
   Object.entries(records || {}).map(([key, ok]) => ({ key, ok }));
 
+const metricNumber = (value: number | null | undefined) =>
+  Number.isFinite(Number(value)) ? Number(value).toLocaleString("vi-VN") : "0";
+
+const metricMs = (value: number | null | undefined) =>
+  Number.isFinite(Number(value)) ? `${Number(value).toLocaleString("vi-VN")} ms` : "-";
+
 export default function HealthPage() {
   const [health, setHealth] = useState<AdminOpsHealth | null>(null);
   const [logs, setLogs] = useState<AdminAuditLogRow[]>([]);
@@ -68,6 +74,9 @@ export default function HealthPage() {
     (health.queues.pendingDirectOrdersExpired > 0 ||
       health.queues.deliveryOutbox.failed > 0 ||
       health.queues.deliveryOutbox.retryDue > 0);
+  const binanceWebhook = health?.binancePayWebhook ?? null;
+  const binanceWebhookAlerts = health?.binancePayWebhookAlerts ?? [];
+  const binanceWebhookRisk = binanceWebhookAlerts.some((alert) => alert.severity === "critical");
 
   return (
     <div className="grid" style={{ gap: 20 }}>
@@ -146,6 +155,118 @@ export default function HealthPage() {
                 ))}
               </tbody>
             </table>
+          </div>
+
+          <div className="card">
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 12 }}>
+              <h3 className="section-title" style={{ marginBottom: 0 }}>Binance Pay webhook</h3>
+              <StatusPill tone={!binanceWebhook ? "neutral" : binanceWebhookRisk ? "danger" : "success"}>
+                {!binanceWebhook ? "Chưa có dữ liệu" : binanceWebhookRisk ? "Cần kiểm tra" : "OK"}
+              </StatusPill>
+            </div>
+            {!binanceWebhook ? (
+              <EmptyState title="Chưa có metric webhook" description="Metric sẽ xuất hiện sau khi checker ghi `bot_checker_health` mới." />
+            ) : (
+              <div className="grid" style={{ gap: 16 }}>
+                {binanceWebhookAlerts.length > 0 && (
+                  <div className="grid" style={{ gap: 8 }}>
+                    {binanceWebhookAlerts.map((alert) => (
+                      <div
+                        key={alert.id}
+                        style={{
+                          border: "1px solid rgba(194, 65, 58, 0.28)",
+                          borderRadius: 8,
+                          padding: 12,
+                          display: "grid",
+                          gap: 6
+                        }}
+                      >
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                          <strong>{alert.title}</strong>
+                          <StatusPill tone={alert.severity === "critical" ? "danger" : "warning"}>
+                            {alert.severity}
+                          </StatusPill>
+                        </div>
+                        <p className="muted">{alert.message}</p>
+                        <p className="muted">
+                          {alert.metric}: {metricNumber(alert.count)} / {alert.windowMinutes} phút gần nhất /{" "}
+                          {formatDateTime(alert.lastAt)}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="grid stats">
+                  <div>
+                    <p className="muted">Webhook nhận</p>
+                    <h2>{metricNumber(binanceWebhook.received)}</h2>
+                    <StatusPill tone={(binanceWebhook.signatureInvalid || 0) > 0 ? "danger" : "success"}>
+                      {metricNumber(binanceWebhook.signatureInvalid)} signature invalid
+                    </StatusPill>
+                  </div>
+                  <div>
+                    <p className="muted">Cert refresh</p>
+                    <h2>{metricNumber(binanceWebhook.certRefresh)}</h2>
+                    <StatusPill tone="neutral">{formatDateTime(binanceWebhook.lastCertRefreshAt)}</StatusPill>
+                  </div>
+                  <div>
+                    <p className="muted">Query Order</p>
+                    <h2>{metricMs(binanceWebhook.lastQueryOrderMs)}</h2>
+                    <StatusPill tone={(binanceWebhook.queryOrderError || 0) > 0 ? "danger" : "success"}>
+                      avg {metricMs(binanceWebhook.avgQueryOrderMs)}
+                    </StatusPill>
+                  </div>
+                  <div>
+                    <p className="muted">Fulfillment</p>
+                    <h2>{metricNumber(binanceWebhook.fulfillmentSuccess)}</h2>
+                    <StatusPill tone={(binanceWebhook.fulfillmentError || 0) > 0 ? "danger" : "success"}>
+                      {binanceWebhook.lastFulfillmentResult || "none"}
+                    </StatusPill>
+                  </div>
+                </div>
+                <table className="table">
+                  <tbody>
+                    <tr>
+                      <td>Signature accepted / unavailable</td>
+                      <td>{metricNumber(binanceWebhook.signatureAccepted)} / {metricNumber(binanceWebhook.signatureUnavailable)}</td>
+                    </tr>
+                    <tr>
+                      <td>Query paid / not paid / mismatch / error</td>
+                      <td>
+                        {metricNumber(binanceWebhook.queryOrderPaid)} / {metricNumber(binanceWebhook.queryOrderNotPaid)} /{" "}
+                        {metricNumber(binanceWebhook.queryOrderMismatch)} / {metricNumber(binanceWebhook.queryOrderError)}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>Fulfillment success / skipped / error</td>
+                      <td>
+                        {metricNumber(binanceWebhook.fulfillmentSuccess)} / {metricNumber(binanceWebhook.fulfillmentSkipped)} /{" "}
+                        {metricNumber(binanceWebhook.fulfillmentError)}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>Last event</td>
+                      <td>{binanceWebhook.lastEvent || "-"}</td>
+                    </tr>
+                    <tr>
+                      <td>Last webhook / query / fulfillment</td>
+                      <td>
+                        {formatDateTime(binanceWebhook.lastWebhookAt)} / {formatDateTime(binanceWebhook.lastQueryOrderAt)} /{" "}
+                        {formatDateTime(binanceWebhook.lastFulfillmentAt)}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>Last trade / prepay</td>
+                      <td>{binanceWebhook.lastMerchantTradeNo || "-"} / {binanceWebhook.lastPrepayId || "-"}</td>
+                    </tr>
+                    <tr>
+                      <td>Last error</td>
+                      <td>{binanceWebhook.lastError || "-"}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
 
           <div className="grid stats">

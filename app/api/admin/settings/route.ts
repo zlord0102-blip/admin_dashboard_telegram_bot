@@ -11,6 +11,11 @@ const SETTINGS_KEYS = [
   "binance_api_key",
   "binance_api_secret",
   "binance_pay_id",
+  "binance_pay_merchant_enabled",
+  "binance_pay_merchant_api_key",
+  "binance_pay_merchant_api_secret",
+  "binance_pay_merchant_base_url",
+  "binance_pay_webhook_url",
   "binance_direct_address",
   "binance_direct_address_tag",
   "binance_direct_enabled",
@@ -38,6 +43,8 @@ const SECRET_SETTING_KEYS = new Set<string>([
   "sepay_token",
   "binance_api_key",
   "binance_api_secret",
+  "binance_pay_merchant_api_key",
+  "binance_pay_merchant_api_secret",
   "payment_notify_bot_token"
 ]);
 
@@ -49,7 +56,8 @@ const TOGGLE_KEYS = new Set<string>([
   "show_withdraw",
   "show_history",
   "show_language",
-  "show_support"
+  "show_support",
+  "binance_pay_merchant_enabled"
 ]);
 
 const normalizeSettingValue = (key: string, value: unknown) => {

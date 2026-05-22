@@ -11,6 +11,11 @@ const SETTINGS_KEYS = [
   "binance_api_key",
   "binance_api_secret",
   "binance_pay_id",
+  "binance_pay_merchant_enabled",
+  "binance_pay_merchant_api_key",
+  "binance_pay_merchant_api_secret",
+  "binance_pay_merchant_base_url",
+  "binance_pay_webhook_url",
   "binance_direct_address",
   "binance_direct_address_tag",
   "binance_direct_enabled",
@@ -48,6 +53,8 @@ const SECRET_SETTING_KEYS = new Set([
   "sepay_token",
   "binance_api_key",
   "binance_api_secret",
+  "binance_pay_merchant_api_key",
+  "binance_pay_merchant_api_secret",
   "payment_notify_bot_token"
 ]);
 
@@ -219,6 +226,52 @@ export default function SettingsPage() {
                   placeholder="Ví dụ: 1039622524"
                   value={values.binance_pay_id || ""}
                   onChange={(e) => updateField("binance_pay_id", e.target.value)}
+                />
+              </label>
+              <label className="toggle" style={{ marginBottom: 2 }}>
+                <input
+                  type="checkbox"
+                  checked={(values.binance_pay_merchant_enabled ?? "false") === "true"}
+                  onChange={(e) => updateField("binance_pay_merchant_enabled", e.target.checked ? "true" : "false")}
+                />
+                <span>Bật Binance Pay Merchant auto-confirm</span>
+              </label>
+              <label className="grid" style={{ gap: 6 }}>
+                <span className="muted">Binance Pay Merchant API Key</span>
+                <input
+                  className="input"
+                  type="password"
+                  placeholder={getSecretPlaceholder("binance_pay_merchant_api_key", secretPresent, "Merchant API Key")}
+                  value={values.binance_pay_merchant_api_key || ""}
+                  onChange={(e) => updateField("binance_pay_merchant_api_key", e.target.value)}
+                />
+              </label>
+              <label className="grid" style={{ gap: 6 }}>
+                <span className="muted">Binance Pay Merchant API Secret</span>
+                <input
+                  className="input"
+                  type="password"
+                  placeholder={getSecretPlaceholder("binance_pay_merchant_api_secret", secretPresent, "Merchant API Secret")}
+                  value={values.binance_pay_merchant_api_secret || ""}
+                  onChange={(e) => updateField("binance_pay_merchant_api_secret", e.target.value)}
+                />
+              </label>
+              <label className="grid" style={{ gap: 6 }}>
+                <span className="muted">Binance Pay Merchant Base URL</span>
+                <input
+                  className="input"
+                  placeholder="https://bpay.binanceapi.com"
+                  value={values.binance_pay_merchant_base_url || ""}
+                  onChange={(e) => updateField("binance_pay_merchant_base_url", e.target.value)}
+                />
+              </label>
+              <label className="grid" style={{ gap: 6 }}>
+                <span className="muted">Webhook URL public gửi cho Binance Pay</span>
+                <input
+                  className="input"
+                  placeholder="https://your-domain.com/binance-pay/webhook"
+                  value={values.binance_pay_webhook_url || ""}
+                  onChange={(e) => updateField("binance_pay_webhook_url", e.target.value)}
                 />
               </label>
               <label className="grid" style={{ gap: 6 }}>

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
 import { getSupabaseAdminClient } from "@/app/api/_shared/supabaseAdmin";
+import { buildBinancePayWebhookAlerts } from "@/lib/binancePayWebhookAlerts";
 
 const SETTING_KEYS = [
   "bank_name",
@@ -9,9 +10,50 @@ const SETTING_KEYS = [
   "sepay_token",
   "binance_api_key",
   "binance_api_secret",
+  "binance_pay_merchant_enabled",
+  "binance_pay_merchant_api_key",
+  "binance_pay_merchant_api_secret",
+  "binance_pay_webhook_url",
   "payment_notify_bot_token",
   "payment_notify_user_id"
 ];
+const CHECKER_HEALTH_SETTING_KEY = "bot_checker_health";
+
+const parseJsonObject = (value: unknown) => {
+  if (typeof value !== "string" || !value.trim()) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+};
+
+const normalizeBinancePayWebhookMetrics = (value: unknown) =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+
+async function loadCheckerHealthState() {
+  const supabase = getSupabaseAdminClient();
+  const { data } = await supabase
+    .from("settings")
+    .select("value")
+    .eq("key", CHECKER_HEALTH_SETTING_KEY)
+    .maybeSingle();
+  return parseJsonObject(data?.value);
+}
+
+const attachCheckerHealth = (snapshot: unknown, checkerHealth: Record<string, unknown>) => ({
+  ...(snapshot && typeof snapshot === "object" && !Array.isArray(snapshot) ? snapshot : {}),
+  checkerHealth,
+  binancePayWebhook: normalizeBinancePayWebhookMetrics(checkerHealth.binancePayWebhook),
+  binancePayWebhookAlerts: buildBinancePayWebhookAlerts(
+    normalizeBinancePayWebhookMetrics(checkerHealth.binancePayWebhook)
+  )
+});
 
 const countRows = async (table: string, filter?: (query: any) => any) => {
   const supabase = getSupabaseAdminClient();
@@ -49,6 +91,7 @@ async function buildFallbackSnapshot(threshold: number) {
   ]);
 
   const { data: settingsData } = await supabase.from("settings").select("key, value").in("key", SETTING_KEYS);
+  const checkerHealth = await loadCheckerHealthState();
   const settings = Object.fromEntries(
     SETTING_KEYS.map((key) => [
       key,
@@ -114,6 +157,8 @@ async function buildFallbackSnapshot(threshold: number) {
     // Keep empty low-stock snapshot.
   }
 
+  const binancePayWebhook = normalizeBinancePayWebhookMetrics(checkerHealth.binancePayWebhook);
+
   return {
     checkedAt: new Date().toISOString(),
     schema: {
@@ -134,6 +179,9 @@ async function buildFallbackSnapshot(threshold: number) {
       }
     },
     settings,
+    checkerHealth,
+    binancePayWebhook,
+    binancePayWebhookAlerts: buildBinancePayWebhookAlerts(binancePayWebhook),
     queues: {
       pendingDeposits: pendingDeposits.count,
       pendingWithdrawals: pendingWithdrawals.count,
@@ -166,7 +214,8 @@ export async function GET(request: NextRequest) {
       }
       return NextResponse.json({ success: true, data: await buildFallbackSnapshot(threshold), fallback: true });
     }
-    return NextResponse.json({ success: true, data });
+    const checkerHealth = await loadCheckerHealthState();
+    return NextResponse.json({ success: true, data: attachCheckerHealth(data, checkerHealth) });
   } catch (error) {
     return NextResponse.json(
       {
