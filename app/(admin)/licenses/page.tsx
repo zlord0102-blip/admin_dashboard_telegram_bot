@@ -101,6 +101,11 @@ export default function LicensesPage() {
   const [extensions, setExtensions] = useState<LicenseExtensionRecord[]>([]);
   const [keys, setKeys] = useState<LicenseKeyRecord[]>([]);
   const [activations, setActivations] = useState<LicenseActivationRecord[]>([]);
+  const [loadedTabs, setLoadedTabs] = useState<Record<LicenseTab, boolean>>({
+    extensions: false,
+    keys: false,
+    activations: false
+  });
   const [loadingExtensions, setLoadingExtensions] = useState(false);
   const [loadingKeys, setLoadingKeys] = useState(false);
   const [loadingActivations, setLoadingActivations] = useState(false);
@@ -148,6 +153,7 @@ export default function LicensesPage() {
     try {
       const data = await fetchLicenseExtensions();
       setExtensions(data);
+      setLoadedTabs((current) => ({ ...current, extensions: true }));
     } finally {
       setLoadingExtensions(false);
     }
@@ -161,6 +167,7 @@ export default function LicensesPage() {
         status: keyFilterStatus
       });
       setKeys(data);
+      setLoadedTabs((current) => ({ ...current, keys: true }));
     } finally {
       setLoadingKeys(false);
     }
@@ -174,32 +181,55 @@ export default function LicensesPage() {
         activeOnly: activationActiveOnly
       });
       setActivations(data);
+      setLoadedTabs((current) => ({ ...current, activations: true }));
     } finally {
       setLoadingActivations(false);
     }
   };
 
-  const refreshAll = async () => {
-    await Promise.all([loadExtensions(), loadKeys(), loadActivations()]);
+  const refreshLicenseData = async ({
+    extensions: includeExtensions = true,
+    keys: includeKeys = false,
+    activations: includeActivations = false
+  }: {
+    extensions?: boolean;
+    keys?: boolean;
+    activations?: boolean;
+  } = {}) => {
+    const tasks: Array<Promise<void>> = [];
+    if (includeExtensions) tasks.push(loadExtensions());
+    if (includeKeys) tasks.push(loadKeys());
+    if (includeActivations) tasks.push(loadActivations());
+    await Promise.all(tasks);
+  };
+
+  const refreshCurrentTab = async () => {
+    await refreshLicenseData({
+      extensions: true,
+      keys: tab === "keys",
+      activations: tab === "activations"
+    });
   };
 
   useEffect(() => {
-    refreshAll().catch((error) => {
+    loadExtensions().catch((error) => {
       setErrorMessage(error instanceof Error ? error.message : "Không thể tải dữ liệu license.");
     });
   }, []);
 
   useEffect(() => {
+    if (tab !== "keys") return;
     loadKeys().catch((error) => {
       setErrorMessage(error instanceof Error ? error.message : "Không thể tải danh sách key.");
     });
-  }, [keyFilterExtensionId, keyFilterStatus]);
+  }, [tab, keyFilterExtensionId, keyFilterStatus]);
 
   useEffect(() => {
+    if (tab !== "activations") return;
     loadActivations().catch((error) => {
       setErrorMessage(error instanceof Error ? error.message : "Không thể tải activation.");
     });
-  }, [activationFilterExtensionId, activationActiveOnly]);
+  }, [tab, activationFilterExtensionId, activationActiveOnly]);
 
   const handleCreateExtension = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -246,7 +276,11 @@ export default function LicensesPage() {
       });
       setEditingExtension(null);
       setStatusMessage("Đã cập nhật extension.");
-      await Promise.all([loadExtensions(), loadKeys(), loadActivations()]);
+      await refreshLicenseData({
+        extensions: true,
+        keys: loadedTabs.keys,
+        activations: loadedTabs.activations
+      });
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Không thể cập nhật extension.");
     } finally {
@@ -260,7 +294,11 @@ export default function LicensesPage() {
     try {
       await saveLicenseExtension({ id: extension.id, action: "delete" });
       setStatusMessage("Đã xóa extension.");
-      await Promise.all([loadExtensions(), loadKeys(), loadActivations()]);
+      await refreshLicenseData({
+        extensions: true,
+        keys: loadedTabs.keys,
+        activations: loadedTabs.activations
+      });
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Không thể xóa extension.");
     } finally {
@@ -294,7 +332,11 @@ export default function LicensesPage() {
       setKeyExpiresAt(createDefaultExpiryInput());
       setKeyDeviceLimitMode("single_device");
       setStatusMessage("Đã tạo license key mới. Hãy lưu raw key ngay bây giờ.");
-      await Promise.all([loadExtensions(), loadKeys(), loadActivations()]);
+      await refreshLicenseData({
+        extensions: true,
+        keys: true,
+        activations: loadedTabs.activations
+      });
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Không thể tạo license key.");
     } finally {
@@ -327,7 +369,11 @@ export default function LicensesPage() {
           ? `Đã cập nhật license key và reset ${response.prunedActivationCount} bind dư để áp dụng chế độ 1 thiết bị.`
           : "Đã cập nhật license key."
       );
-      await Promise.all([loadExtensions(), loadKeys(), loadActivations()]);
+      await refreshLicenseData({
+        extensions: true,
+        keys: true,
+        activations: loadedTabs.activations
+      });
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Không thể cập nhật license key.");
     } finally {
@@ -341,7 +387,11 @@ export default function LicensesPage() {
     try {
       await revokeLicenseKey(key.id);
       setStatusMessage("Đã thu hồi license key.");
-      await Promise.all([loadExtensions(), loadKeys(), loadActivations()]);
+      await refreshLicenseData({
+        extensions: true,
+        keys: true,
+        activations: loadedTabs.activations
+      });
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Không thể thu hồi key.");
     } finally {
@@ -355,7 +405,11 @@ export default function LicensesPage() {
     try {
       await reactivateLicenseKey(key.id);
       setStatusMessage("Đã kích hoạt lại license key.");
-      await Promise.all([loadExtensions(), loadKeys(), loadActivations()]);
+      await refreshLicenseData({
+        extensions: true,
+        keys: true,
+        activations: loadedTabs.activations
+      });
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Không thể kích hoạt lại key.");
     } finally {
@@ -369,7 +423,11 @@ export default function LicensesPage() {
     try {
       await resetLicenseKeyActivation(keyId);
       setStatusMessage("Đã reset tất cả bind hiện tại của key.");
-      await Promise.all([loadExtensions(), loadKeys(), loadActivations()]);
+      await refreshLicenseData({
+        extensions: true,
+        keys: loadedTabs.keys,
+        activations: true
+      });
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Không thể reset activation.");
     } finally {
@@ -383,7 +441,11 @@ export default function LicensesPage() {
     try {
       await resetLicenseActivation(activation.id);
       setStatusMessage("Đã reset activation được chọn.");
-      await Promise.all([loadExtensions(), loadKeys(), loadActivations()]);
+      await refreshLicenseData({
+        extensions: true,
+        keys: loadedTabs.keys,
+        activations: true
+      });
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Không thể reset activation này.");
     } finally {
@@ -475,12 +537,12 @@ export default function LicensesPage() {
             type="button"
             onClick={() => {
               clearFeedback();
-              refreshAll().catch((error) => {
+              refreshCurrentTab().catch((error) => {
                 setErrorMessage(error instanceof Error ? error.message : "Không thể làm mới dữ liệu.");
               });
             }}
           >
-            Làm mới
+            Làm mới tab hiện tại
           </button>
           <div className="badge">Supabase + Dashboard</div>
         </div>
@@ -493,15 +555,15 @@ export default function LicensesPage() {
         </div>
         <div className="card">
           <p className="muted">Keys</p>
-          <h2>{keys.length}</h2>
+          <h2>{loadedTabs.keys ? keys.length : "-"}</h2>
         </div>
         <div className="card">
           <p className="muted">Activations</p>
-          <h2>{activations.length}</h2>
+          <h2>{loadedTabs.activations ? activations.length : "-"}</h2>
         </div>
         <div className="card">
           <p className="muted">Đang bind</p>
-          <h2>{activations.filter((item) => item.status === "active").length}</h2>
+          <h2>{loadedTabs.activations ? activations.filter((item) => item.status === "active").length : "-"}</h2>
         </div>
       </div>
 

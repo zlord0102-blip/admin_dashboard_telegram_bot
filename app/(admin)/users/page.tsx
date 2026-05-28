@@ -1,9 +1,20 @@
 "use client";
 
-import { Fragment, useDeferredValue, useEffect, useState } from "react";
+import { Fragment, useDeferredValue, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
-import { RowActionMenu } from "@/components/AdminUi";
+import { PaginationControls, RowActionMenu } from "@/components/AdminUi";
+import {
+  BROADCAST_TITLE_PRESETS_KEY,
+  USER_BROADCAST_TEMPLATES_KEY,
+  createBroadcastTemplateId,
+  createEmptyBroadcastTemplate,
+  legacyTitlesToTemplates,
+  normalizeBroadcastTemplates,
+  parseBroadcastTemplates,
+  parseLegacyBroadcastTitles,
+  type BroadcastTemplate
+} from "@/lib/broadcastTemplates";
 import {
   fetchUserOrdersSnapshot,
   fetchUsersSnapshot,
@@ -13,25 +24,6 @@ import {
   type UserSnapshotRow,
   type UsersSnapshot
 } from "@/lib/adminAnalyticsClient";
-
-const BROADCAST_TITLE_PRESETS_KEY = "broadcast_title_presets";
-
-const parseBroadcastTitlePresets = (rawValue: string | null | undefined) => {
-  if (!rawValue) return [];
-  try {
-    const parsed = JSON.parse(rawValue);
-    if (!Array.isArray(parsed)) return [];
-    return Array.from(
-      new Set(
-        parsed
-          .map((value) => String(value || "").trim())
-          .filter(Boolean)
-      )
-    ).slice(0, 20);
-  } catch {
-    return [];
-  }
-};
 
 type TelegramBroadcastJobSnapshot = {
   id: number;
@@ -52,16 +44,18 @@ type TelegramBroadcastJobSnapshot = {
 
 export default function UsersPage() {
   const router = useRouter();
-  const PAGE_SIZE = 50;
   const [users, setUsers] = useState<UserSnapshotRow[]>([]);
+  const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [filterMode, setFilterMode] = useState<UsersFilterMode>("all");
   const [sortMode, setSortMode] = useState<UsersSortMode>("newest");
   const [broadcastMessage, setBroadcastMessage] = useState("");
-  const [broadcastTitlePresets, setBroadcastTitlePresets] = useState<string[]>([]);
-  const [selectedBroadcastTitleIndex, setSelectedBroadcastTitleIndex] = useState(-1);
-  const [broadcastTitleDraft, setBroadcastTitleDraft] = useState("");
-  const [titleManagerOpen, setTitleManagerOpen] = useState(false);
+  const [broadcastTemplates, setBroadcastTemplates] = useState<BroadcastTemplate[]>([]);
+  const [selectedBroadcastTemplateId, setSelectedBroadcastTemplateId] = useState("");
+  const [broadcastTemplateDraft, setBroadcastTemplateDraft] = useState<BroadcastTemplate>(
+    createEmptyBroadcastTemplate
+  );
+  const [templateManagerOpen, setTemplateManagerOpen] = useState(false);
   const [broadcastConfirmOpen, setBroadcastConfirmOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -69,6 +63,7 @@ export default function UsersPage() {
   const [broadcastJob, setBroadcastJob] = useState<TelegramBroadcastJobSnapshot | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [totalCount, setTotalCount] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const [selectedOrdersUser, setSelectedOrdersUser] = useState<UserSnapshotRow | null>(null);
@@ -84,46 +79,52 @@ export default function UsersPage() {
     pageIndex: number,
     keyword: string,
     nextFilterMode: UsersFilterMode,
-    nextSortMode: UsersSortMode
+    nextSortMode: UsersSortMode,
+    nextPageSize = pageSize
   ) => {
-    const snapshot: UsersSnapshot = await fetchUsersSnapshot({
-      page: pageIndex,
-      pageSize: PAGE_SIZE,
-      search: keyword,
-      filterMode: nextFilterMode,
-      sortMode: nextSortMode
-    });
-    setUsers(snapshot.users);
-    setTotalCount(snapshot.totalCount);
-    setTotalPages(snapshot.totalPages);
-    setLoadError(null);
+    setLoading(true);
+    try {
+      const snapshot: UsersSnapshot = await fetchUsersSnapshot({
+        page: pageIndex,
+        pageSize: nextPageSize,
+        search: keyword,
+        filterMode: nextFilterMode,
+        sortMode: nextSortMode
+      });
+      setUsers(snapshot.users);
+      setTotalCount(snapshot.totalCount);
+      setTotalPages(snapshot.totalPages);
+      setLoadError(null);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const loadBroadcastTitlePresets = async () => {
+  const loadBroadcastTemplates = async () => {
     const { data, error } = await supabase
       .from("settings")
-      .select("value")
-      .eq("key", BROADCAST_TITLE_PRESETS_KEY)
-      .maybeSingle();
+      .select("key,value")
+      .in("key", [USER_BROADCAST_TEMPLATES_KEY, BROADCAST_TITLE_PRESETS_KEY]);
 
     if (error) {
       throw error;
     }
 
-    setBroadcastTitlePresets(parseBroadcastTitlePresets(data?.value));
+    const rows = ((data as Array<{ key?: string; value?: string | null }>) || []);
+    const templatesRaw = rows.find((row) => row.key === USER_BROADCAST_TEMPLATES_KEY)?.value;
+    const legacyTitlesRaw = rows.find((row) => row.key === BROADCAST_TITLE_PRESETS_KEY)?.value;
+    const templates = parseBroadcastTemplates(templatesRaw);
+    const legacyTemplates = legacyTitlesToTemplates(parseLegacyBroadcastTitles(legacyTitlesRaw));
+    setBroadcastTemplates(templates.length ? templates : legacyTemplates);
   };
 
-  const saveBroadcastTitlePresets = async (nextPresets: string[]) => {
-    const sanitized = Array.from(
-      new Set(
-        nextPresets.map((value) => String(value || "").trim()).filter(Boolean)
-      )
-    ).slice(0, 20);
+  const saveBroadcastTemplates = async (nextTemplates: BroadcastTemplate[]) => {
+    const sanitized = normalizeBroadcastTemplates(nextTemplates);
 
     const { error } = await supabase
       .from("settings")
       .upsert(
-        [{ key: BROADCAST_TITLE_PRESETS_KEY, value: JSON.stringify(sanitized) }],
+        [{ key: USER_BROADCAST_TEMPLATES_KEY, value: JSON.stringify(sanitized) }],
         { onConflict: "key" }
       );
 
@@ -131,39 +132,41 @@ export default function UsersPage() {
       throw error;
     }
 
-    setBroadcastTitlePresets(sanitized);
+    setBroadcastTemplates(sanitized);
     return sanitized;
   };
 
   useEffect(() => {
-    load(page, deferredSearch, filterMode, sortMode).catch(() => {
+    if (search !== deferredSearch) {
+      return;
+    }
+    load(page, deferredSearch, filterMode, sortMode, pageSize).catch(() => {
       setUsers([]);
       setTotalCount(0);
       setTotalPages(1);
       setLoadError("Không thể tải danh sách user.");
     });
-  }, [page, deferredSearch, filterMode, sortMode]);
+  }, [page, pageSize, search, deferredSearch, filterMode, sortMode]);
 
   useEffect(() => {
-    loadBroadcastTitlePresets().catch(() => {
-      setBroadcastTitlePresets([]);
+    loadBroadcastTemplates().catch(() => {
+      setBroadcastTemplates([]);
     });
   }, []);
 
   useEffect(() => {
-    setPage(1);
-  }, [search, filterMode, sortMode]);
-
-  useEffect(() => {
-    if (selectedBroadcastTitleIndex < 0 || selectedBroadcastTitleIndex >= broadcastTitlePresets.length) {
-      if (selectedBroadcastTitleIndex !== -1) {
-        setSelectedBroadcastTitleIndex(-1);
-      }
-      setBroadcastTitleDraft("");
+    if (!selectedBroadcastTemplateId) {
+      setBroadcastTemplateDraft(createEmptyBroadcastTemplate());
       return;
     }
-    setBroadcastTitleDraft(broadcastTitlePresets[selectedBroadcastTitleIndex] || "");
-  }, [selectedBroadcastTitleIndex, broadcastTitlePresets]);
+    const selected = broadcastTemplates.find((template) => template.id === selectedBroadcastTemplateId);
+    if (!selected) {
+      setSelectedBroadcastTemplateId("");
+      setBroadcastTemplateDraft(createEmptyBroadcastTemplate());
+      return;
+    }
+    setBroadcastTemplateDraft(selected);
+  }, [selectedBroadcastTemplateId, broadcastTemplates]);
 
   useEffect(() => {
     if (!broadcastJobActive || !broadcastJob?.id) {
@@ -298,12 +301,28 @@ export default function UsersPage() {
     }
   };
 
-  const selectedBroadcastTitle =
-    selectedBroadcastTitleIndex >= 0 ? broadcastTitlePresets[selectedBroadcastTitleIndex]?.trim() || "" : "";
+  const selectedBroadcastTemplate = useMemo(
+    () => broadcastTemplates.find((template) => template.id === selectedBroadcastTemplateId) || null,
+    [broadcastTemplates, selectedBroadcastTemplateId]
+  );
+
+  const selectedBroadcastTitle = selectedBroadcastTemplate?.title.trim() || "";
 
   const finalBroadcastMessage = selectedBroadcastTitle
     ? `${selectedBroadcastTitle}\n${broadcastMessage.trim()}`.trim()
     : broadcastMessage.trim();
+
+  const selectBroadcastTemplate = (templateId: string) => {
+    setSelectedBroadcastTemplateId(templateId);
+    setPresetStatus(null);
+    const selected = broadcastTemplates.find((template) => template.id === templateId) || null;
+    if (selected) {
+      setBroadcastMessage(selected.message);
+      setBroadcastTemplateDraft(selected);
+    } else {
+      setBroadcastTemplateDraft(createEmptyBroadcastTemplate());
+    }
+  };
 
   const handleBroadcast = async () => {
     if (broadcastJobActive) {
@@ -327,60 +346,69 @@ export default function UsersPage() {
     setBroadcastMessage("");
   };
 
-  const handleAddBroadcastTitle = async () => {
-    const normalized = broadcastTitleDraft.trim();
+  const handleAddBroadcastTemplate = async () => {
+    const draft = {
+      ...broadcastTemplateDraft,
+      id: createBroadcastTemplateId()
+    };
+    const [normalized] = normalizeBroadcastTemplates([draft]);
     if (!normalized) {
-      setPresetStatus("Nhập title trước khi lưu.");
+      setPresetStatus("Nhập title hoặc message trước khi lưu.");
       return;
     }
 
     try {
-      const nextPresets = await saveBroadcastTitlePresets([...broadcastTitlePresets, normalized]);
-      const nextIndex = nextPresets.findIndex((value) => value === normalized);
-      setSelectedBroadcastTitleIndex(nextIndex);
-      setPresetStatus("✅ Đã lưu title broadcast.");
+      const nextTemplates = await saveBroadcastTemplates([...broadcastTemplates, normalized]);
+      setSelectedBroadcastTemplateId(normalized.id);
+      setBroadcastTemplateDraft(nextTemplates.find((template) => template.id === normalized.id) || normalized);
+      setPresetStatus("✅ Đã lưu template broadcast.");
     } catch {
-      setPresetStatus("Không thể lưu title broadcast.");
+      setPresetStatus("Không thể lưu template broadcast.");
     }
   };
 
-  const handleUpdateBroadcastTitle = async () => {
-    const normalized = broadcastTitleDraft.trim();
-    if (selectedBroadcastTitleIndex < 0) {
-      setPresetStatus("Chọn title cần cập nhật.");
+  const handleUpdateBroadcastTemplate = async () => {
+    if (!selectedBroadcastTemplateId) {
+      setPresetStatus("Chọn template cần cập nhật.");
       return;
     }
+    const [normalized] = normalizeBroadcastTemplates([
+      { ...broadcastTemplateDraft, id: selectedBroadcastTemplateId }
+    ]);
     if (!normalized) {
-      setPresetStatus("Title không được để trống.");
+      setPresetStatus("Template cần có title hoặc message.");
       return;
     }
 
     try {
-      const nextPresets = [...broadcastTitlePresets];
-      nextPresets[selectedBroadcastTitleIndex] = normalized;
-      const savedPresets = await saveBroadcastTitlePresets(nextPresets);
-      const nextIndex = savedPresets.findIndex((value) => value === normalized);
-      setSelectedBroadcastTitleIndex(nextIndex);
-      setPresetStatus("✅ Đã cập nhật title broadcast.");
+      const nextTemplates = broadcastTemplates.map((template) =>
+        template.id === selectedBroadcastTemplateId ? normalized : template
+      );
+      const savedTemplates = await saveBroadcastTemplates(nextTemplates);
+      setBroadcastTemplateDraft(
+        savedTemplates.find((template) => template.id === selectedBroadcastTemplateId) || normalized
+      );
+      setPresetStatus("✅ Đã cập nhật template broadcast.");
     } catch {
-      setPresetStatus("Không thể cập nhật title broadcast.");
+      setPresetStatus("Không thể cập nhật template broadcast.");
     }
   };
 
-  const handleDeleteBroadcastTitle = async () => {
-    if (selectedBroadcastTitleIndex < 0) {
-      setPresetStatus("Chọn title cần xóa.");
+  const handleDeleteBroadcastTemplate = async () => {
+    if (!selectedBroadcastTemplateId) {
+      setPresetStatus("Chọn template cần xóa.");
       return;
     }
 
     try {
-      const nextPresets = broadcastTitlePresets.filter((_, index) => index !== selectedBroadcastTitleIndex);
-      await saveBroadcastTitlePresets(nextPresets);
-      setSelectedBroadcastTitleIndex(-1);
-      setBroadcastTitleDraft("");
-      setPresetStatus("✅ Đã xóa title broadcast.");
+      await saveBroadcastTemplates(
+        broadcastTemplates.filter((template) => template.id !== selectedBroadcastTemplateId)
+      );
+      setSelectedBroadcastTemplateId("");
+      setBroadcastTemplateDraft(createEmptyBroadcastTemplate());
+      setPresetStatus("✅ Đã xóa template broadcast.");
     } catch {
-      setPresetStatus("Không thể xóa title broadcast.");
+      setPresetStatus("Không thể xóa template broadcast.");
     }
   };
 
@@ -422,12 +450,18 @@ export default function UsersPage() {
             className="input"
             placeholder="Tìm theo user_id hoặc username"
             value={search}
-            onChange={(event) => setSearch(event.target.value)}
+            onChange={(event) => {
+              setPage(1);
+              setSearch(event.target.value);
+            }}
           />
           <select
             className="select"
             value={filterMode}
-            onChange={(event) => setFilterMode(event.target.value as UsersFilterMode)}
+            onChange={(event) => {
+              setPage(1);
+              setFilterMode(event.target.value as UsersFilterMode);
+            }}
           >
             <option value="all">Tất cả user</option>
             <option value="with_revenue">User có doanh thu</option>
@@ -437,7 +471,10 @@ export default function UsersPage() {
           <select
             className="select"
             value={sortMode}
-            onChange={(event) => setSortMode(event.target.value as UsersSortMode)}
+            onChange={(event) => {
+              setPage(1);
+              setSortMode(event.target.value as UsersSortMode);
+            }}
           >
             <option value="newest">Mới tạo gần đây</option>
             <option value="oldest">Cũ nhất</option>
@@ -460,17 +497,13 @@ export default function UsersPage() {
           <div className="broadcast-toolbar">
             <select
               className="select"
-              value={selectedBroadcastTitleIndex >= 0 ? String(selectedBroadcastTitleIndex) : ""}
-              onChange={(event) => {
-                const nextValue = event.target.value;
-                setSelectedBroadcastTitleIndex(nextValue === "" ? -1 : Number(nextValue));
-                setPresetStatus(null);
-              }}
+              value={selectedBroadcastTemplateId}
+              onChange={(event) => selectBroadcastTemplate(event.target.value)}
             >
-              <option value="">Không dùng title</option>
-              {broadcastTitlePresets.map((title, index) => (
-                <option key={`${index}-${title}`} value={index}>
-                  {`Option ${index + 1}: ${title}`}
+              <option value="">Không dùng template</option>
+              {broadcastTemplates.map((template) => (
+                <option key={template.id} value={template.id}>
+                  {template.name}
                 </option>
               ))}
             </select>
@@ -479,24 +512,25 @@ export default function UsersPage() {
               type="button"
               onClick={() => {
                 setPresetStatus(null);
-                setTitleManagerOpen(true);
+                setTemplateManagerOpen(true);
               }}
             >
-              Thêm title
+              Quản lý template
             </button>
           </div>
           <div className="broadcast-title-meta">
-            <span className="muted">Title sẽ được ghép lên đầu nội dung broadcast.</span>
+            <span className="muted">Template gồm title và message; message hỗ trợ Telegram custom emoji dạng {"{emoji:12345}"}.</span>
           </div>
-          {selectedBroadcastTitleIndex >= 0 && broadcastTitlePresets[selectedBroadcastTitleIndex] && (
+          {selectedBroadcastTemplate && (
             <div className="broadcast-title-preview">
-              <span className="muted">Đang dùng:</span> {broadcastTitlePresets[selectedBroadcastTitleIndex]}
+              <span className="muted">Đang dùng:</span> {selectedBroadcastTemplate.name}
+              {selectedBroadcastTemplate.title && <> · {selectedBroadcastTemplate.title}</>}
             </div>
           )}
           <div className="form-split">
             <textarea
               className="textarea"
-              placeholder="Nhập nội dung gửi cho tất cả user đã nhắn bot"
+              placeholder="Nhập nội dung gửi cho tất cả user đã nhắn bot. Có thể dùng {emoji:12345}."
               value={broadcastMessage}
               onChange={(event) => setBroadcastMessage(event.target.value)}
             />
@@ -521,7 +555,7 @@ export default function UsersPage() {
               className="button secondary"
               type="button"
               onClick={() => {
-                load(page, deferredSearch, filterMode, sortMode).catch(() => {
+                load(page, deferredSearch, filterMode, sortMode, pageSize).catch(() => {
                   setLoadError("Không thể tải danh sách user.");
                 });
               }}
@@ -578,32 +612,23 @@ export default function UsersPage() {
             ))}
             {!users.length && (
               <tr>
-                <td colSpan={10} className="muted">Chưa có dữ liệu.</td>
+                <td colSpan={10} className="muted">{loading ? "Đang tải user..." : "Chưa có dữ liệu."}</td>
               </tr>
             )}
           </tbody>
         </table>
-        {totalPages > 1 && (
-          <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 12 }}>
-            <button
-              className="button secondary"
-              disabled={page === 1}
-              onClick={() => setPage(Math.max(1, page - 1))}
-            >
-              Trang trước
-            </button>
-            <span className="muted">
-              Trang {page}/{totalPages} · Tổng {totalCount.toLocaleString("vi-VN")}
-            </span>
-            <button
-              className="button secondary"
-              disabled={page === totalPages}
-              onClick={() => setPage(Math.min(totalPages, page + 1))}
-            >
-              Trang sau
-            </button>
-          </div>
-        )}
+        <PaginationControls
+          page={page}
+          totalPages={totalPages}
+          totalCount={totalCount}
+          pageSize={pageSize}
+          disabled={loading}
+          onPageChange={setPage}
+          onPageSizeChange={(nextPageSize) => {
+            setPageSize(nextPageSize);
+            setPage(1);
+          }}
+        />
       </div>
 
       {userOrdersOpen && (
@@ -687,32 +712,49 @@ export default function UsersPage() {
         </div>
       )}
 
-      {titleManagerOpen && (
-        <div className="modal-backdrop" onClick={() => setTitleManagerOpen(false)}>
+      {templateManagerOpen && (
+        <div className="modal-backdrop" onClick={() => setTemplateManagerOpen(false)}>
           <div className="modal" onClick={(event) => event.stopPropagation()}>
-            <h3 className="section-title">Quản lý title broadcast</h3>
+            <h3 className="section-title">Quản lý template broadcast</h3>
             <div className="form-grid">
               <select
                 className="select form-section"
-                value={selectedBroadcastTitleIndex >= 0 ? String(selectedBroadcastTitleIndex) : ""}
+                value={selectedBroadcastTemplateId}
                 onChange={(event) => {
-                  const nextValue = event.target.value;
-                  setSelectedBroadcastTitleIndex(nextValue === "" ? -1 : Number(nextValue));
-                  setPresetStatus(null);
+                  selectBroadcastTemplate(event.target.value);
                 }}
               >
-                <option value="">Chọn title để sửa / không chọn để thêm mới</option>
-                {broadcastTitlePresets.map((title, index) => (
-                  <option key={`${index}-${title}`} value={index}>
-                    {`Option ${index + 1}: ${title}`}
+                <option value="">Chọn template để sửa / không chọn để thêm mới</option>
+                {broadcastTemplates.map((template) => (
+                  <option key={template.id} value={template.id}>
+                    {template.name}
                   </option>
                 ))}
               </select>
               <input
                 className="input form-section"
-                placeholder="Nhập title broadcast"
-                value={broadcastTitleDraft}
-                onChange={(event) => setBroadcastTitleDraft(event.target.value)}
+                placeholder="Tên template"
+                value={broadcastTemplateDraft.name}
+                onChange={(event) =>
+                  setBroadcastTemplateDraft({ ...broadcastTemplateDraft, name: event.target.value })
+                }
+              />
+              <input
+                className="input form-section"
+                placeholder="Template title"
+                value={broadcastTemplateDraft.title}
+                onChange={(event) =>
+                  setBroadcastTemplateDraft({ ...broadcastTemplateDraft, title: event.target.value })
+                }
+              />
+              <textarea
+                className="textarea form-section"
+                placeholder="Template message, hỗ trợ {emoji:12345}"
+                rows={7}
+                value={broadcastTemplateDraft.message}
+                onChange={(event) =>
+                  setBroadcastTemplateDraft({ ...broadcastTemplateDraft, message: event.target.value })
+                }
               />
               {presetStatus && (
                 <p className="muted form-section" style={{ marginTop: -4 }}>
@@ -720,30 +762,30 @@ export default function UsersPage() {
                 </p>
               )}
               <div className="modal-actions">
-                <button className="button secondary" type="button" onClick={() => setTitleManagerOpen(false)}>
+                <button className="button secondary" type="button" onClick={() => setTemplateManagerOpen(false)}>
                   Đóng
                 </button>
                 <button
                   className="button secondary"
                   type="button"
-                  onClick={handleDeleteBroadcastTitle}
-                  disabled={selectedBroadcastTitleIndex < 0}
+                  onClick={handleDeleteBroadcastTemplate}
+                  disabled={!selectedBroadcastTemplateId}
                 >
-                  Xóa title
+                  Xóa
                 </button>
                 <button
                   className="button secondary"
                   type="button"
-                  onClick={handleUpdateBroadcastTitle}
-                  disabled={selectedBroadcastTitleIndex < 0 || !broadcastTitleDraft.trim()}
+                  onClick={handleUpdateBroadcastTemplate}
+                  disabled={!selectedBroadcastTemplateId}
                 >
                   Cập nhật
                 </button>
                 <button
                   className="button"
                   type="button"
-                  onClick={handleAddBroadcastTitle}
-                  disabled={!broadcastTitleDraft.trim()}
+                  onClick={handleAddBroadcastTemplate}
+                  disabled={!broadcastTemplateDraft.title.trim() && !broadcastTemplateDraft.message.trim()}
                 >
                   Thêm mới
                 </button>

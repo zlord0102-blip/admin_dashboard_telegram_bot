@@ -10,6 +10,7 @@ import {
   sendTelegramTextMessage,
   type TelegramSendFailure
 } from "@/app/api/_shared/telegramBroadcastJobs";
+import { withAdminApiTiming } from "@/app/api/_shared/serverTiming";
 
 const MAX_MESSAGE_LENGTH = 4096;
 const BROADCAST_INVALID_CHAT_IDS_KEY = "broadcast_invalid_chat_ids";
@@ -96,7 +97,7 @@ const sendBroadcastInline = async (
   };
 };
 
-export async function POST(request: NextRequest) {
+async function handlePOST(request: NextRequest) {
   if (!isTelegramBotConfigured()) {
     return NextResponse.json({ error: "BOT_TOKEN missing." }, { status: 500 });
   }
@@ -237,3 +238,5 @@ export async function POST(request: NextRequest) {
 
   return NextResponse.json({ success, failed, total: targets.length });
 }
+
+export const POST = withAdminApiTiming("POST /api/telegram/send", handlePOST);

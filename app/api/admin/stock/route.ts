@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
 import { getSupabaseAdminClient } from "@/app/api/_shared/supabaseAdmin";
 import { recordAdminAuditEvent } from "@/app/api/_shared/adminAudit";
+import { withAdminApiTiming } from "@/app/api/_shared/serverTiming";
 
 const normalizeIds = (value: unknown) => {
   if (!Array.isArray(value)) return [];
@@ -19,7 +20,62 @@ const toPositiveId = (value: unknown) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
 
-export async function POST(request: NextRequest) {
+const loadStockSummary = async (productId: number) => {
+  const supabase = getSupabaseAdminClient();
+  const [totalRes, soldRes] = await Promise.all([
+    supabase
+      .from("stock")
+      .select("id", { count: "exact", head: true })
+      .eq("product_id", productId),
+    supabase
+      .from("stock")
+      .select("id", { count: "exact", head: true })
+      .eq("product_id", productId)
+      .eq("sold", true)
+  ]);
+
+  if (totalRes.error) throw totalRes.error;
+  if (soldRes.error) throw soldRes.error;
+
+  const total = totalRes.count ?? 0;
+  const sold = soldRes.count ?? 0;
+  return {
+    total,
+    sold,
+    remaining: Math.max(total - sold, 0)
+  };
+};
+
+async function handleGET(request: NextRequest) {
+  const adminSession = await requireAdminSession(request);
+  if (adminSession.ok === false) {
+    return adminSession.response;
+  }
+
+  const url = new URL(request.url);
+  const productId = toPositiveId(url.searchParams.get("productId"));
+  if (!productId) {
+    return NextResponse.json({ error: "productId không hợp lệ." }, { status: 400 });
+  }
+
+  try {
+    const summary = await loadStockSummary(productId);
+    return NextResponse.json({
+      success: true,
+      data: {
+        productId,
+        summary
+      }
+    });
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Không thể tải stock summary." },
+      { status: 500 }
+    );
+  }
+}
+
+async function handlePOST(request: NextRequest) {
   const adminSession = await requireAdminSession(request);
   if (adminSession.ok === false) {
     return adminSession.response;
@@ -129,3 +185,6 @@ export async function POST(request: NextRequest) {
     );
   }
 }
+
+export const GET = withAdminApiTiming("GET /api/admin/stock", handleGET);
+export const POST = withAdminApiTiming("POST /api/admin/stock", handlePOST);

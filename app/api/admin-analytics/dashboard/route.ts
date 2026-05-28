@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
 import { getDashboardSnapshot } from "@/app/api/_shared/adminAnalytics";
+import { getSupabaseAdminClient } from "@/app/api/_shared/supabaseAdmin";
 import { getOrSetServerCache } from "@/app/api/_shared/serverCache";
-import { buildServerTimingHeader } from "@/app/api/_shared/serverTiming";
+import { buildServerTimingHeader, withAdminApiTiming } from "@/app/api/_shared/serverTiming";
 
 const DASHBOARD_CACHE_TTL_MS = 15_000;
 
-export async function GET(request: NextRequest) {
+async function handleGET(request: NextRequest) {
   const routeStartedAt = performance.now();
   const adminSession = await requireAdminSession(request);
   const authDuration = performance.now() - routeStartedAt;
@@ -16,8 +17,9 @@ export async function GET(request: NextRequest) {
 
   try {
     const analyticsStartedAt = performance.now();
-    const { value: data, hit } = await getOrSetServerCache("admin-analytics:dashboard:v2", DASHBOARD_CACHE_TTL_MS, () =>
-      getDashboardSnapshot(adminSession.supabase)
+    const supabase = getSupabaseAdminClient();
+    const { value: data, hit } = await getOrSetServerCache("admin-analytics:dashboard:v3", DASHBOARD_CACHE_TTL_MS, () =>
+      getDashboardSnapshot(supabase)
     );
     const analyticsDuration = performance.now() - analyticsStartedAt;
     const response = NextResponse.json({ success: true, data });
@@ -51,3 +53,5 @@ export async function GET(request: NextRequest) {
     return response;
   }
 }
+
+export const GET = withAdminApiTiming("GET /api/admin-analytics/dashboard", handleGET);

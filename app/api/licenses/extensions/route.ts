@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
 import { listLicenseExtensions, normalizeExtensionCode, normalizeOptionalText } from "@/app/api/_shared/license";
+import { getOrSetServerCache, invalidateServerCacheByPrefix } from "@/app/api/_shared/serverCache";
+import { withAdminApiTiming } from "@/app/api/_shared/serverTiming";
+
+const LICENSE_ADMIN_CACHE_PREFIX = "admin-license:";
+const LICENSE_ADMIN_CACHE_TTL_MS = 15_000;
 
 const toPositiveInt = (value: unknown) => {
   const parsed = Number(value);
@@ -12,15 +17,23 @@ const isDuplicateError = (message: string) => {
   return lowered.includes("duplicate key") || lowered.includes("already exists");
 };
 
-export async function GET(request: NextRequest) {
+const invalidateLicenseAdminCache = () => invalidateServerCacheByPrefix(LICENSE_ADMIN_CACHE_PREFIX);
+
+async function handleGET(request: NextRequest) {
   const adminSession = await requireAdminSession(request);
   if (adminSession.ok === false) {
     return adminSession.response;
   }
 
   try {
-    const data = await listLicenseExtensions(adminSession.supabase);
-    return NextResponse.json({ success: true, data });
+    const { value: data, hit } = await getOrSetServerCache(
+      `${LICENSE_ADMIN_CACHE_PREFIX}extensions:v1`,
+      LICENSE_ADMIN_CACHE_TTL_MS,
+      () => listLicenseExtensions(adminSession.supabase)
+    );
+    const response = NextResponse.json({ success: true, data });
+    response.headers.set("X-Admin-Api-Cache", hit ? "hit" : "miss");
+    return response;
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Không thể tải danh sách extension." },
@@ -29,7 +42,7 @@ export async function GET(request: NextRequest) {
   }
 }
 
-export async function POST(request: NextRequest) {
+async function handlePOST(request: NextRequest) {
   const adminSession = await requireAdminSession(request);
   if (adminSession.ok === false) {
     return adminSession.response;
@@ -82,6 +95,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: error.message || "Không thể xóa extension." }, { status: 500 });
     }
 
+    invalidateLicenseAdminCache();
     return NextResponse.json({ success: true, data: { ok: true, id: extensionId } });
   }
 
@@ -126,6 +140,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: error.message || "Không thể cập nhật extension." }, { status: 500 });
     }
 
+    invalidateLicenseAdminCache();
     return NextResponse.json({ success: true, data: { ok: true, id: extensionId } });
   }
 
@@ -153,5 +168,9 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  invalidateLicenseAdminCache();
   return NextResponse.json({ success: true, data: { ok: true, id: data?.id } });
 }
+
+export const GET = withAdminApiTiming("GET /api/licenses/extensions", handleGET);
+export const POST = withAdminApiTiming("POST /api/licenses/extensions", handlePOST);

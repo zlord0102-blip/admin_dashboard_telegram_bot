@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { supabase } from "@/lib/supabaseClient";
-import { performAdminFinanceAction } from "@/lib/adminFinanceClient";
+import { fetchAdminFinanceQueue, performAdminFinanceAction } from "@/lib/adminFinanceClient";
 import { ConfirmDialog, RowActionMenu } from "@/components/AdminUi";
 
 interface UsdtWithdrawal {
@@ -25,16 +24,12 @@ export default function UsdtPage() {
   const [pendingAction, setPendingAction] = useState<PendingUsdtAction>(null);
 
   const load = async () => {
-    const { data: withdrawals } = await supabase
-      .from("usdt_withdrawals")
-      .select("id, user_id, usdt_amount, wallet_address, network, status, created_at")
-      .eq("status", "pending")
-      .order("created_at", { ascending: false });
-    setUsdtWithdrawals((withdrawals as UsdtWithdrawal[]) || []);
+    const snapshot = await fetchAdminFinanceQueue<UsdtWithdrawal>("usdt_withdrawal");
+    setUsdtWithdrawals(snapshot.rows || []);
   };
 
   useEffect(() => {
-    load();
+    load().catch(() => setUsdtWithdrawals([]));
   }, []);
 
   const confirmUsdtWithdrawal = async (withdrawal: UsdtWithdrawal) => {

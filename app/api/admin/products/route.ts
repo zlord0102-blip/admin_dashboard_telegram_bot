@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
 import { getSupabaseAdminClient } from "@/app/api/_shared/supabaseAdmin";
 import { recordAdminAuditEvent } from "@/app/api/_shared/adminAudit";
+import { withAdminApiTiming } from "@/app/api/_shared/serverTiming";
 
 const toPositiveId = (value: unknown) => {
   const parsed = Number.parseInt(String(value || ""), 10);
@@ -108,6 +109,54 @@ const getProductMutationPayload = (body: any) => {
 
 type PositionShiftRow = { id: number; sort_position: number };
 
+type OrderedProductPositionRow = {
+  id: number;
+  sort_position: number | null;
+};
+
+async function normalizeActiveProductPositions(
+  supabase: ReturnType<typeof getSupabaseAdminClient>,
+  pinnedProductId?: number,
+  requestedPosition?: number | null
+) {
+  const { data, error } = await supabase
+    .from("products")
+    .select("id, sort_position")
+    .eq("is_deleted", false)
+    .eq("is_hidden", false)
+    .order("sort_position", { ascending: true, nullsFirst: false })
+    .order("id", { ascending: true });
+
+  if (error) throw error;
+
+  const rows = ((data as OrderedProductPositionRow[]) || []).map((row) => ({
+    id: Number(row.id),
+    sort_position: row.sort_position !== null && row.sort_position !== undefined ? Number(row.sort_position) : null
+  }));
+
+  let orderedRows = rows;
+  if (pinnedProductId && rows.some((row) => row.id === pinnedProductId)) {
+    const pinned = rows.find((row) => row.id === pinnedProductId)!;
+    orderedRows = rows.filter((row) => row.id !== pinnedProductId);
+    const targetPosition =
+      requestedPosition !== null && requestedPosition !== undefined
+        ? Math.min(Math.max(Math.trunc(requestedPosition), 1), orderedRows.length + 1)
+        : orderedRows.length + 1;
+    orderedRows.splice(targetPosition - 1, 0, pinned);
+  }
+
+  for (let index = 0; index < orderedRows.length; index += 1) {
+    const nextPosition = index + 1;
+    const row = orderedRows[index];
+    if (row.sort_position === nextPosition) continue;
+    const { error: updateError } = await supabase
+      .from("products")
+      .update({ sort_position: nextPosition })
+      .eq("id", row.id);
+    if (updateError) throw updateError;
+  }
+}
+
 async function shiftRowsForInsert(
   supabase: ReturnType<typeof getSupabaseAdminClient>,
   tableName: "products" | "bot_product_folders",
@@ -153,7 +202,7 @@ async function restoreShiftedRows(
   }
 }
 
-export async function POST(request: NextRequest) {
+async function handlePOST(request: NextRequest) {
   const adminSession = await requireAdminSession(request);
   if (adminSession.ok === false) {
     return adminSession.response;
@@ -168,23 +217,17 @@ export async function POST(request: NextRequest) {
       const parsed = getProductMutationPayload(body);
       if (parsed.error) return NextResponse.json({ error: parsed.error }, { status: 400 });
 
-      let shiftedRows: PositionShiftRow[] = [];
       const sortPosition = parsed.payload!.sort_position;
-      if (sortPosition !== null) {
-        shiftedRows = await shiftRowsForInsert(supabase, "products", sortPosition);
-      }
 
       const { data, error } = await supabase
         .from("products")
         .insert(parsed.payload!)
         .select("id")
         .single();
-      if (error) {
-        if (shiftedRows.length) await restoreShiftedRows(supabase, "products", shiftedRows);
-        throw error;
-      }
+      if (error) throw error;
 
       const productId = Number(data?.id);
+      await normalizeActiveProductPositions(supabase, productId, sortPosition);
       await recordAdminAuditEvent(supabase, {
         adminUserId: adminSession.userId,
         adminEmail: adminSession.email,
@@ -204,6 +247,7 @@ export async function POST(request: NextRequest) {
 
       const { error } = await supabase.from("products").update(parsed.payload!).eq("id", productId);
       if (error) throw error;
+      await normalizeActiveProductPositions(supabase, productId, parsed.payload!.sort_position);
 
       await recordAdminAuditEvent(supabase, {
         adminUserId: adminSession.userId,
@@ -343,6 +387,7 @@ export async function POST(request: NextRequest) {
         .update({ is_deleted: true, is_hidden: true, deleted_at: new Date().toISOString() })
         .eq("id", productId);
       if (error) throw error;
+      await normalizeActiveProductPositions(supabase);
       await recordAdminAuditEvent(supabase, {
         adminUserId: adminSession.userId,
         adminEmail: adminSession.email,
@@ -361,6 +406,7 @@ export async function POST(request: NextRequest) {
         .update({ is_deleted: false, is_hidden: false, deleted_at: null })
         .eq("id", productId);
       if (error) throw error;
+      await normalizeActiveProductPositions(supabase, productId, null);
       await recordAdminAuditEvent(supabase, {
         adminUserId: adminSession.userId,
         adminEmail: adminSession.email,
@@ -377,6 +423,7 @@ export async function POST(request: NextRequest) {
       const hidden = Boolean(body?.hidden);
       const { error } = await supabase.from("products").update({ is_hidden: hidden }).eq("id", productId);
       if (error) throw error;
+      await normalizeActiveProductPositions(supabase, hidden ? undefined : productId, null);
       await recordAdminAuditEvent(supabase, {
         adminUserId: adminSession.userId,
         adminEmail: adminSession.email,
@@ -415,3 +462,5 @@ export async function POST(request: NextRequest) {
     );
   }
 }
+
+export const POST = withAdminApiTiming("POST /api/admin/products", handlePOST);

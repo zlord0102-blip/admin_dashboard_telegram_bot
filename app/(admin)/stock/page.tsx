@@ -2,8 +2,18 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
-import { adminApiRequest } from "@/lib/adminOpsClient";
-import { ConfirmDialog, RowActionMenu } from "@/components/AdminUi";
+import { adminApiGet, adminApiRequest } from "@/lib/adminOpsClient";
+import { ConfirmDialog, PaginationControls, RowActionMenu } from "@/components/AdminUi";
+import {
+  DEFAULT_STOCK_BROADCAST_TEMPLATE,
+  STOCK_BROADCAST_TEMPLATES_KEY,
+  createBroadcastTemplateId,
+  createEmptyBroadcastTemplate,
+  normalizeBroadcastTemplates,
+  parseBroadcastTemplates,
+  renderTemplateText,
+  type BroadcastTemplate
+} from "@/lib/broadcastTemplates";
 
 interface Product {
   id: number;
@@ -64,22 +74,45 @@ const CUSTOM_CHECK_HISTORY_KEY = "stock_custom_check_form_history_v1";
 const MAX_CUSTOM_CHECK_HISTORY_ITEMS = 5;
 const AVAILABLE_CUSTOM_SOURCES: CustomCheckSource[] = ["hotmail", "tempmail", "tinyhost"];
 const AVAILABLE_CUSTOM_CONCURRENCY = [5, 10, 20, 50];
+const parseStockLines = (text: string) =>
+  Array.from(
+    new Set(
+      text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+    )
+  );
 
 export default function StockPage() {
-  const PAGE_SIZE = 100;
   const [products, setProducts] = useState<Product[]>([]);
   const [productTab, setProductTab] = useState<"active" | "inactive">("active");
   const [selectedProductId, setSelectedProductId] = useState<string>("");
   const [stockItems, setStockItems] = useState<StockItem[]>([]);
   const [stockSummary, setStockSummary] = useState<StockSummary>({ total: 0, sold: 0, remaining: 0 });
   const [content, setContent] = useState("");
+  const [broadcastAfterAdd, setBroadcastAfterAdd] = useState(false);
+  const [stockBroadcastTemplates, setStockBroadcastTemplates] = useState<BroadcastTemplate[]>([
+    DEFAULT_STOCK_BROADCAST_TEMPLATE
+  ]);
+  const [selectedStockBroadcastTemplateId, setSelectedStockBroadcastTemplateId] = useState(
+    DEFAULT_STOCK_BROADCAST_TEMPLATE.id
+  );
+  const [stockBroadcastTemplateDraft, setStockBroadcastTemplateDraft] = useState<BroadcastTemplate>(
+    createEmptyBroadcastTemplate
+  );
+  const [stockBroadcastManagerOpen, setStockBroadcastManagerOpen] = useState(false);
+  const [stockBroadcastTemplateStatus, setStockBroadcastTemplateStatus] = useState<string | null>(null);
+  const [stockBroadcastStatus, setStockBroadcastStatus] = useState<string | null>(null);
   const [stockFormTab, setStockFormTab] = useState<"add" | "delete">("add");
   const [stockActionPanelOpen, setStockActionPanelOpen] = useState(false);
   const [customCheckPanelOpen, setCustomCheckPanelOpen] = useState(false);
   const [deleteContent, setDeleteContent] = useState("");
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [totalCount, setTotalCount] = useState(0);
-  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  const [stockLoading, setStockLoading] = useState(false);
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
   const [selectedStockIds, setSelectedStockIds] = useState<Set<number>>(new Set());
   const [editingStock, setEditingStock] = useState<StockItem | null>(null);
   const [editContent, setEditContent] = useState("");
@@ -132,8 +165,36 @@ export default function StockPage() {
     );
   }, [productTab, products]);
 
+  const selectedProduct = useMemo(
+    () => products.find((product) => product.id === Number(selectedProductId)) || null,
+    [products, selectedProductId]
+  );
+
+  const selectedStockBroadcastTemplate = useMemo(
+    () =>
+      stockBroadcastTemplates.find((template) => template.id === selectedStockBroadcastTemplateId) ||
+      stockBroadcastTemplates[0] ||
+      DEFAULT_STOCK_BROADCAST_TEMPLATE,
+    [stockBroadcastTemplates, selectedStockBroadcastTemplateId]
+  );
+
+  const stockAddLineCount = useMemo(() => parseStockLines(content).length, [content]);
+  const stockBroadcastPreview = useMemo(
+    () =>
+      renderTemplateText(selectedStockBroadcastTemplate.message || DEFAULT_STOCK_BROADCAST_TEMPLATE.message, {
+        product_name: selectedProduct?.name || "Sản phẩm",
+        added_count: stockAddLineCount,
+        current_stock: stockSummary.remaining + stockAddLineCount,
+        total_stock: stockSummary.total + stockAddLineCount
+      }),
+    [selectedProduct?.name, selectedStockBroadcastTemplate.message, stockAddLineCount, stockSummary.remaining, stockSummary.total]
+  );
+
   const loadProducts = async () => {
-    const { data } = await supabase.from("products").select("*").order("id");
+    const { data } = await supabase
+      .from("products")
+      .select("id, name, is_hidden, is_deleted, sort_position")
+      .order("id");
     const rows = ((data as Array<Record<string, unknown>>) || []).map((row) => ({
       id: Number(row.id),
       name: String(row.name || `#${String(row.id || "")}`),
@@ -147,47 +208,75 @@ export default function StockPage() {
     setProducts(rows);
   };
 
-  const loadStock = async (productId: string, pageIndex = page) => {
+  const loadStock = async (productId: string, pageIndex = page, nextPageSize = pageSize) => {
     if (!productId) return;
-    const from = (pageIndex - 1) * PAGE_SIZE;
-    const to = from + PAGE_SIZE - 1;
-    const { data, count } = await supabase
-      .from("stock")
-      .select("id, product_id, content, sold", { count: "exact" })
-      .eq("product_id", Number(productId))
-      .order("sold", { ascending: true })
-      .order("id", { ascending: false })
-      .range(from, to);
-    setStockItems((data as StockItem[]) || []);
-    setTotalCount(count ?? 0);
+    setStockLoading(true);
+    try {
+      const from = (pageIndex - 1) * nextPageSize;
+      const to = from + nextPageSize - 1;
+      const { data, count } = await supabase
+        .from("stock")
+        .select("id, product_id, content, sold", { count: "exact" })
+        .eq("product_id", Number(productId))
+        .order("sold", { ascending: true })
+        .order("id", { ascending: false })
+        .range(from, to);
+      setStockItems((data as StockItem[]) || []);
+      setTotalCount(count ?? 0);
+    } finally {
+      setStockLoading(false);
+    }
   };
 
   const loadStockSummary = async (productId: string) => {
     if (!productId) {
-      setStockSummary({ total: 0, sold: 0, remaining: 0 });
-      return;
+      const emptySummary = { total: 0, sold: 0, remaining: 0 };
+      setStockSummary(emptySummary);
+      return emptySummary;
     }
 
-    const numericProductId = Number(productId);
-    const [totalRes, soldRes] = await Promise.all([
-      supabase
-        .from("stock")
-        .select("id", { count: "exact", head: true })
-        .eq("product_id", numericProductId),
-      supabase
-        .from("stock")
-        .select("id", { count: "exact", head: true })
-        .eq("product_id", numericProductId)
-        .eq("sold", true)
-    ]);
+    try {
+      const params = new URLSearchParams({ productId });
+      const { summary } = await adminApiGet<{ summary: StockSummary }>(
+        `/api/admin/stock?${params.toString()}`
+      );
+      setStockSummary(summary);
+      return summary;
+    } catch {
+      const emptySummary = { total: 0, sold: 0, remaining: 0 };
+      setStockSummary(emptySummary);
+      return emptySummary;
+    }
+  };
 
-    const total = totalRes.count ?? 0;
-    const sold = soldRes.count ?? 0;
-    setStockSummary({
-      total,
-      sold,
-      remaining: Math.max(total - sold, 0)
-    });
+  const loadStockBroadcastTemplates = async () => {
+    const { data, error } = await supabase
+      .from("settings")
+      .select("value")
+      .eq("key", STOCK_BROADCAST_TEMPLATES_KEY)
+      .maybeSingle();
+
+    if (error) throw error;
+    const templates = parseBroadcastTemplates(data?.value);
+    const nextTemplates = templates.length ? templates : [DEFAULT_STOCK_BROADCAST_TEMPLATE];
+    setStockBroadcastTemplates(nextTemplates);
+    setSelectedStockBroadcastTemplateId((current) =>
+      nextTemplates.some((template) => template.id === current) ? current : nextTemplates[0]?.id || ""
+    );
+  };
+
+  const saveStockBroadcastTemplates = async (nextTemplates: BroadcastTemplate[]) => {
+    const sanitized = normalizeBroadcastTemplates(nextTemplates);
+    const { error } = await supabase
+      .from("settings")
+      .upsert(
+        [{ key: STOCK_BROADCAST_TEMPLATES_KEY, value: JSON.stringify(sanitized) }],
+        { onConflict: "key" }
+      );
+    if (error) throw error;
+    const templates = sanitized.length ? sanitized : [DEFAULT_STOCK_BROADCAST_TEMPLATE];
+    setStockBroadcastTemplates(templates);
+    return templates;
   };
 
   const updateRecentValues = <T,>(history: T[], value: T) =>
@@ -267,6 +356,20 @@ export default function StockPage() {
   }, []);
 
   useEffect(() => {
+    loadStockBroadcastTemplates().catch(() => {
+      setStockBroadcastTemplates([DEFAULT_STOCK_BROADCAST_TEMPLATE]);
+      setSelectedStockBroadcastTemplateId(DEFAULT_STOCK_BROADCAST_TEMPLATE.id);
+    });
+  }, []);
+
+  useEffect(() => {
+    const selected = stockBroadcastTemplates.find(
+      (template) => template.id === selectedStockBroadcastTemplateId
+    );
+    setStockBroadcastTemplateDraft(selected || createEmptyBroadcastTemplate());
+  }, [selectedStockBroadcastTemplateId, stockBroadcastTemplates]);
+
+  useEffect(() => {
     if (!selectedProductId) return;
     const existsInTab = filteredProducts.some((product) => product.id === Number(selectedProductId));
     if (!existsInTab) {
@@ -333,7 +436,6 @@ export default function StockPage() {
       setCustomDeleteMessage(null);
       return;
     }
-    setPage(1);
     setSelectedStockIds(new Set());
     setCustomCheckResults([]);
     setCustomCheckError(null);
@@ -343,9 +445,9 @@ export default function StockPage() {
 
   useEffect(() => {
     if (selectedProductId) {
-      loadStock(selectedProductId, page);
+      loadStock(selectedProductId, page, pageSize);
     }
-  }, [selectedProductId, page]);
+  }, [selectedProductId, page, pageSize]);
 
   useEffect(() => {
     if (!selectedProductId) return;
@@ -355,7 +457,7 @@ export default function StockPage() {
   useEffect(() => {
     // Selection is scoped to the current page and product filter for predictable bulk actions.
     setSelectedStockIds(new Set());
-  }, [page]);
+  }, [page, pageSize]);
 
   useEffect(() => {
     const el = selectAllRef.current;
@@ -377,21 +479,84 @@ export default function StockPage() {
     }
   }, [page, totalPages]);
 
-  const parseMultiline = (text: string) =>
-    Array.from(
-      new Set(
-        text
-          .split("\n")
-          .map((line) => line.trim())
-          .filter(Boolean)
-      )
-    );
+  const selectStockBroadcastTemplate = (templateId: string) => {
+    setSelectedStockBroadcastTemplateId(templateId);
+    setStockBroadcastTemplateStatus(null);
+    const selected =
+      stockBroadcastTemplates.find((template) => template.id === templateId) ||
+      createEmptyBroadcastTemplate();
+    setStockBroadcastTemplateDraft(selected);
+  };
+
+  const handleAddStockBroadcastTemplate = async () => {
+    if (!stockBroadcastTemplateDraft.message.trim()) {
+      setStockBroadcastTemplateStatus("Nhập message template trước khi lưu.");
+      return;
+    }
+    const [normalized] = normalizeBroadcastTemplates([
+      { ...stockBroadcastTemplateDraft, id: createBroadcastTemplateId(), title: "" }
+    ]);
+    if (!normalized) return;
+    try {
+      const templates = await saveStockBroadcastTemplates([...stockBroadcastTemplates, normalized]);
+      setSelectedStockBroadcastTemplateId(normalized.id);
+      setStockBroadcastTemplateDraft(templates.find((template) => template.id === normalized.id) || normalized);
+      setStockBroadcastTemplateStatus("✅ Đã lưu template stock broadcast.");
+    } catch {
+      setStockBroadcastTemplateStatus("Không thể lưu template stock broadcast.");
+    }
+  };
+
+  const handleUpdateStockBroadcastTemplate = async () => {
+    if (!selectedStockBroadcastTemplateId) {
+      setStockBroadcastTemplateStatus("Chọn template cần cập nhật.");
+      return;
+    }
+    if (!stockBroadcastTemplateDraft.message.trim()) {
+      setStockBroadcastTemplateStatus("Message template không được để trống.");
+      return;
+    }
+    const [normalized] = normalizeBroadcastTemplates([
+      { ...stockBroadcastTemplateDraft, id: selectedStockBroadcastTemplateId, title: "" }
+    ]);
+    if (!normalized) return;
+    try {
+      const templates = await saveStockBroadcastTemplates(
+        stockBroadcastTemplates.map((template) =>
+          template.id === selectedStockBroadcastTemplateId ? normalized : template
+        )
+      );
+      setStockBroadcastTemplateDraft(
+        templates.find((template) => template.id === selectedStockBroadcastTemplateId) || normalized
+      );
+      setStockBroadcastTemplateStatus("✅ Đã cập nhật template stock broadcast.");
+    } catch {
+      setStockBroadcastTemplateStatus("Không thể cập nhật template stock broadcast.");
+    }
+  };
+
+  const handleDeleteStockBroadcastTemplate = async () => {
+    if (!selectedStockBroadcastTemplateId) {
+      setStockBroadcastTemplateStatus("Chọn template cần xóa.");
+      return;
+    }
+    try {
+      const templates = await saveStockBroadcastTemplates(
+        stockBroadcastTemplates.filter((template) => template.id !== selectedStockBroadcastTemplateId)
+      );
+      setSelectedStockBroadcastTemplateId(templates[0]?.id || DEFAULT_STOCK_BROADCAST_TEMPLATE.id);
+      setStockBroadcastTemplateStatus("✅ Đã xóa template stock broadcast.");
+    } catch {
+      setStockBroadcastTemplateStatus("Không thể xóa template stock broadcast.");
+    }
+  };
 
   const handleAddStock = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!selectedProductId) return;
-    const lines = parseMultiline(content);
+    const lines = parseStockLines(content);
     if (!lines.length) return;
+    setStockBroadcastStatus(null);
 
     try {
       await adminApiRequest("/api/admin/stock", {
@@ -408,11 +573,36 @@ export default function StockPage() {
       return;
     }
     setContent("");
-    await loadStockSummary(selectedProductId);
+    const nextSummary = await loadStockSummary(selectedProductId);
     if (page === 1) {
-      await loadStock(selectedProductId, 1);
+      await loadStock(selectedProductId, 1, pageSize);
     } else {
       setPage(1);
+    }
+
+    if (broadcastAfterAdd) {
+      const message = renderTemplateText(
+        selectedStockBroadcastTemplate.message || DEFAULT_STOCK_BROADCAST_TEMPLATE.message,
+        {
+          product_name: selectedProduct?.name || "Sản phẩm",
+          added_count: lines.length,
+          current_stock: nextSummary.remaining,
+          total_stock: nextSummary.total
+        }
+      ).trim();
+      if (!message) {
+        setStockBroadcastStatus("Template broadcast đang trống nên không gửi.");
+        return;
+      }
+      try {
+        await adminApiRequest("/api/telegram/send", {
+          method: "POST",
+          body: JSON.stringify({ message, broadcast: true })
+        });
+        setStockBroadcastStatus("✅ Đã tạo broadcast sau khi thêm stock.");
+      } catch (error) {
+        setStockBroadcastStatus(error instanceof Error ? error.message : "Không thể broadcast sau khi thêm stock.");
+      }
     }
   };
 
@@ -467,7 +657,7 @@ export default function StockPage() {
     setBulkSoldAction("keep");
     setSelectedStockIds(new Set());
     await loadStockSummary(selectedProductId);
-    await loadStock(selectedProductId, page);
+    await loadStock(selectedProductId, page, pageSize);
   };
 
   const handleBulkDeleteConfirm = async () => {
@@ -496,14 +686,14 @@ export default function StockPage() {
     const removedOnPage = stockItems.filter((item) => ids.includes(item.id)).length;
     const shouldGoPrev = removedOnPage === stockItems.length && page > 1;
     if (shouldGoPrev) setPage(page - 1);
-    else await loadStock(selectedProductId, page);
+    else await loadStock(selectedProductId, page, pageSize);
   };
 
   const prepareDeleteByText = async (event: React.FormEvent) => {
     event.preventDefault();
     if (deleteByTextBusy) return;
     if (!selectedProductId) return;
-    const queries = parseMultiline(deleteContent);
+    const queries = parseStockLines(deleteContent);
     if (!queries.length) return;
 
     setDeleteByTextBusy(true);
@@ -553,7 +743,7 @@ export default function StockPage() {
       setDeleteContent("");
       setSelectedStockIds(new Set());
       await loadStockSummary(selectedProductId);
-      if (page === 1) await loadStock(selectedProductId, 1);
+      if (page === 1) await loadStock(selectedProductId, 1, pageSize);
       else setPage(1);
     } finally {
       setDeleteByTextBusy(false);
@@ -594,7 +784,7 @@ export default function StockPage() {
     }
     cancelEdit();
     await loadStockSummary(selectedProductId);
-    await loadStock(selectedProductId, page);
+    await loadStock(selectedProductId, page, pageSize);
   };
 
   const handleDeleteConfirm = async () => {
@@ -618,7 +808,7 @@ export default function StockPage() {
     if (shouldGoPrev) {
       setPage(page - 1);
     } else {
-      await loadStock(selectedProductId, page);
+      await loadStock(selectedProductId, page, pageSize);
     }
   };
 
@@ -795,7 +985,7 @@ export default function StockPage() {
       );
 
       await loadStockSummary(productId);
-      await loadStock(productId, page);
+      await loadStock(productId, page, pageSize);
     } catch (error) {
       setCustomDeleteMessage(
         error instanceof Error ? error.message : "Không thể xóa stock theo nhóm kết quả."
@@ -865,7 +1055,10 @@ export default function StockPage() {
           <select
             className="select"
             value={selectedProductId}
-            onChange={(event) => setSelectedProductId(event.target.value)}
+            onChange={(event) => {
+              setPage(1);
+              setSelectedProductId(event.target.value);
+            }}
           >
             <option value="">-- Chọn sản phẩm --</option>
             {filteredProducts.map((product) => (
@@ -938,6 +1131,45 @@ export default function StockPage() {
               value={content}
               onChange={(event) => setContent(event.target.value)}
             />
+            <div className="form-section broadcast-compose">
+              <label className="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={broadcastAfterAdd}
+                  onChange={(event) => setBroadcastAfterAdd(event.target.checked)}
+                />
+                <span>Broadcast cho tất cả user sau khi thêm stock</span>
+              </label>
+              {broadcastAfterAdd && (
+                <>
+                  <div className="broadcast-toolbar">
+                    <select
+                      className="select"
+                      value={selectedStockBroadcastTemplateId}
+                      onChange={(event) => selectStockBroadcastTemplate(event.target.value)}
+                    >
+                      {stockBroadcastTemplates.map((template) => (
+                        <option key={template.id} value={template.id}>
+                          {template.name}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      className="button secondary"
+                      type="button"
+                      onClick={() => {
+                        setStockBroadcastTemplateStatus(null);
+                        setStockBroadcastManagerOpen(true);
+                      }}
+                    >
+                      Quản lý template
+                    </button>
+                  </div>
+                  <div className="broadcast-confirm-preview">{stockBroadcastPreview}</div>
+                </>
+              )}
+              {stockBroadcastStatus && <p className="muted">{stockBroadcastStatus}</p>}
+            </div>
             <button className="button" type="submit" disabled={!selectedProductId}>
               Thêm stock
             </button>
@@ -1316,22 +1548,23 @@ export default function StockPage() {
             ))}
             {!stockItems.length && (
               <tr>
-                <td colSpan={5} className="muted">Chưa có stock.</td>
+                <td colSpan={5} className="muted">{stockLoading ? "Đang tải stock..." : "Chưa có stock."}</td>
               </tr>
             )}
           </tbody>
         </table>
-        {totalPages > 1 && (
-          <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 12 }}>
-            <button className="button secondary" disabled={page === 1} onClick={() => setPage(Math.max(1, page - 1))}>
-              Trang trước
-            </button>
-            <span className="muted">Trang {page}/{totalPages} · Tổng {totalCount}</span>
-            <button className="button secondary" disabled={page === totalPages} onClick={() => setPage(Math.min(totalPages, page + 1))}>
-              Trang sau
-            </button>
-          </div>
-        )}
+        <PaginationControls
+          page={page}
+          totalPages={totalPages}
+          totalCount={totalCount}
+          pageSize={pageSize}
+          disabled={stockLoading}
+          onPageChange={setPage}
+          onPageSizeChange={(nextPageSize) => {
+            setPageSize(nextPageSize);
+            setPage(1);
+          }}
+        />
       </div>
 
       {editingStock && (
@@ -1465,6 +1698,93 @@ export default function StockPage() {
               >
                 Hủy
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {stockBroadcastManagerOpen && (
+        <div className="modal-backdrop" onClick={() => setStockBroadcastManagerOpen(false)}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <h3 className="section-title">Quản lý template stock broadcast</h3>
+            <div className="form-grid">
+              <select
+                className="select form-section"
+                value={selectedStockBroadcastTemplateId}
+                onChange={(event) => selectStockBroadcastTemplate(event.target.value)}
+              >
+                {stockBroadcastTemplates.map((template) => (
+                  <option key={template.id} value={template.id}>
+                    {template.name}
+                  </option>
+                ))}
+              </select>
+              <input
+                className="input form-section"
+                placeholder="Tên template"
+                value={stockBroadcastTemplateDraft.name}
+                onChange={(event) =>
+                  setStockBroadcastTemplateDraft({ ...stockBroadcastTemplateDraft, name: event.target.value })
+                }
+              />
+              <textarea
+                className="textarea form-section"
+                placeholder="Message template. Biến: {product_name}, {added_count}, {current_stock}, {total_stock}. Emoji: {emoji:12345}"
+                rows={8}
+                value={stockBroadcastTemplateDraft.message}
+                onChange={(event) =>
+                  setStockBroadcastTemplateDraft({ ...stockBroadcastTemplateDraft, message: event.target.value })
+                }
+              />
+              {stockBroadcastTemplateStatus && (
+                <p className="muted form-section" style={{ marginTop: -4 }}>
+                  {stockBroadcastTemplateStatus}
+                </p>
+              )}
+              <div className="broadcast-confirm-preview form-section">
+                {renderTemplateText(
+                  stockBroadcastTemplateDraft.message || DEFAULT_STOCK_BROADCAST_TEMPLATE.message,
+                  {
+                    product_name: selectedProduct?.name || "Sản phẩm",
+                    added_count: stockAddLineCount || 3,
+                    current_stock: stockSummary.remaining + (stockAddLineCount || 3),
+                    total_stock: stockSummary.total + (stockAddLineCount || 3)
+                  }
+                )}
+              </div>
+              <div className="modal-actions">
+                <button
+                  className="button secondary"
+                  type="button"
+                  onClick={() => setStockBroadcastManagerOpen(false)}
+                >
+                  Đóng
+                </button>
+                <button
+                  className="button secondary"
+                  type="button"
+                  onClick={handleDeleteStockBroadcastTemplate}
+                  disabled={!selectedStockBroadcastTemplateId}
+                >
+                  Xóa
+                </button>
+                <button
+                  className="button secondary"
+                  type="button"
+                  onClick={handleUpdateStockBroadcastTemplate}
+                  disabled={!selectedStockBroadcastTemplateId || !stockBroadcastTemplateDraft.message.trim()}
+                >
+                  Cập nhật
+                </button>
+                <button
+                  className="button"
+                  type="button"
+                  onClick={handleAddStockBroadcastTemplate}
+                  disabled={!stockBroadcastTemplateDraft.message.trim()}
+                >
+                  Thêm mới
+                </button>
+              </div>
             </div>
           </div>
         </div>

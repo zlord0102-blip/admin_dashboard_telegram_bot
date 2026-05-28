@@ -2,11 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
 import { getUserOrdersSnapshot } from "@/app/api/_shared/adminAnalytics";
 import { getOrSetServerCache } from "@/app/api/_shared/serverCache";
-import { buildServerTimingHeader } from "@/app/api/_shared/serverTiming";
+import { buildServerTimingHeader, withAdminApiTiming } from "@/app/api/_shared/serverTiming";
 
 const USER_ORDERS_CACHE_TTL_MS = 10_000;
 
-export async function GET(
+async function handleGET(
   request: NextRequest,
   context: { params: { userId: string } }
 ) {
@@ -57,3 +57,5 @@ export async function GET(
     return response;
   }
 }
+
+export const GET = withAdminApiTiming("GET /api/admin-analytics/users/[userId]/orders", handleGET);

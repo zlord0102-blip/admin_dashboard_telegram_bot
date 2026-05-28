@@ -6,6 +6,10 @@ import type {
 } from "@/lib/binancePayWebhookAlerts";
 import { supabase } from "@/lib/supabaseClient";
 
+const ADMIN_OPS_GET_CACHE_TTL_MS = 5_000;
+const adminOpsGetCache = new Map<string, { expiresAt: number; data: unknown }>();
+const adminOpsGetRequests = new Map<string, Promise<unknown>>();
+
 export type { BinancePayWebhookAlert, BinancePayWebhookHealth };
 
 export type AdminOpsHealth = {
@@ -52,37 +56,102 @@ export type AdminAuditLogRow = {
   created_at: string;
 };
 
-async function fetchWithAdminAuth<T>(path: string, init: RequestInit = {}): Promise<T> {
+type AdminOpsRequestOptions = RequestInit & {
+  cacheGet?: boolean;
+  force?: boolean;
+};
+
+async function fetchWithAdminAuth<T>(path: string, init: AdminOpsRequestOptions = {}): Promise<T> {
+  const { cacheGet = false, force = false, ...requestInit } = init;
   const { data } = await supabase.auth.getSession();
   const token = data.session?.access_token;
   if (!token) throw new Error("Chưa đăng nhập.");
+  const method = String(requestInit.method || "GET").toUpperCase();
+  const cacheKey = `${token}:${method}:${path}`;
+  const canDedupeGet = method === "GET" && force !== true;
+  const canUseClientCache = canDedupeGet && cacheGet;
+  const now = Date.now();
 
-  const response = await fetch(path, {
-    ...init,
-    headers: (() => {
-      const headers = new Headers(init.headers);
-      headers.set("Authorization", `Bearer ${token}`);
-      return headers;
-    })(),
-    cache: "no-store"
-  });
+  if (canUseClientCache) {
+    const cached = adminOpsGetCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return cached.data as T;
+    }
 
-  const json = await response.json().catch(() => null);
-  if (!response.ok) {
-    throw new Error(
-      typeof json?.error === "string" && json.error.trim()
-        ? json.error
-        : "Không thể tải dữ liệu."
-    );
   }
-  return (json?.data ?? null) as T;
+
+  if (canDedupeGet) {
+    const pending = adminOpsGetRequests.get(cacheKey);
+    if (pending) return pending as Promise<T>;
+  }
+
+  const request = (async () => {
+    const response = await fetch(path, {
+      ...requestInit,
+      headers: (() => {
+        const headers = new Headers(requestInit.headers);
+        headers.set("Authorization", `Bearer ${token}`);
+        return headers;
+      })(),
+      cache: "no-store"
+    });
+
+    const json = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(
+        typeof json?.error === "string" && json.error.trim()
+          ? json.error
+          : "Không thể tải dữ liệu."
+      );
+    }
+    const result = (json?.data ?? null) as T;
+    if (canUseClientCache) {
+      adminOpsGetCache.set(cacheKey, {
+        data: result,
+        expiresAt: Date.now() + ADMIN_OPS_GET_CACHE_TTL_MS
+      });
+    }
+    return result;
+  })();
+
+  if (canDedupeGet) {
+    adminOpsGetRequests.set(cacheKey, request as Promise<unknown>);
+  }
+  try {
+    return await request;
+  } finally {
+    adminOpsGetRequests.delete(cacheKey);
+  }
 }
 
-export const fetchAdminOpsHealth = (lowStock = 5) =>
-  fetchWithAdminAuth<AdminOpsHealth>(`/api/admin/health?lowStock=${Math.max(0, Math.trunc(lowStock) || 0)}`);
+export const fetchAdminOpsHealth = (lowStock = 5, options: { force?: boolean } = {}) => {
+  const params = new URLSearchParams();
+  params.set("lowStock", String(Math.max(0, Math.trunc(lowStock) || 0)));
+  if (options.force) {
+    params.set("_refresh", String(Date.now()));
+  }
+  return fetchWithAdminAuth<AdminOpsHealth>(`/api/admin/health?${params.toString()}`, {
+    cacheGet: true,
+    force: options.force
+  });
+};
 
-export const fetchAdminAuditLogs = (limit = 40) =>
-  fetchWithAdminAuth<{ logs: AdminAuditLogRow[] }>(`/api/admin/audit?limit=${Math.max(1, Math.min(Math.trunc(limit) || 40, 100))}`);
+export const fetchAdminAuditLogs = (limit = 40, options: { force?: boolean } = {}) =>
+  fetchWithAdminAuth<{ logs: AdminAuditLogRow[] }>(
+    `/api/admin/audit?limit=${Math.max(1, Math.min(Math.trunc(limit) || 40, 100))}`,
+    { cacheGet: true, force: options.force }
+  );
+
+export async function adminApiGet<T>(
+  path: string,
+  options: { cacheGet?: boolean; force?: boolean } = {}
+): Promise<T> {
+  return fetchWithAdminAuth<T>(path, {
+    method: "GET",
+    cacheGet: options.cacheGet,
+    force: options.force
+  });
+}
 
 export async function adminApiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);

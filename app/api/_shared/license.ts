@@ -547,31 +547,32 @@ export async function listLicenseKeys(
   }
 
   const extensionIds = Array.from(new Set(keyRows.map((row) => row.extension_id)));
-  const { data: extensionData, error: extensionError } = await supabase
-    .from("license_extensions")
-    .select("id, code, name, description, is_active, created_at, updated_at")
-    .in("id", extensionIds);
-
-  if (extensionError) {
-    throw extensionError;
-  }
-
   const keyIds = keyRows.map((row) => row.id);
-  const { data: activationData, error: activationError } = await supabase
-    .from("license_activations")
-    .select("id, license_key_id, fingerprint, activated_at, last_checked_at, last_version")
-    .in("license_key_id", keyIds)
-    .order("last_checked_at", { ascending: false })
-    .order("activated_at", { ascending: false })
-    .is("deactivated_at", null);
+  const [extensionResult, activationResult] = await Promise.all([
+    supabase
+      .from("license_extensions")
+      .select("id, code, name, description, is_active, created_at, updated_at")
+      .in("id", extensionIds),
+    supabase
+      .from("license_activations")
+      .select("id, license_key_id, fingerprint, activated_at, last_checked_at, last_version")
+      .in("license_key_id", keyIds)
+      .order("last_checked_at", { ascending: false })
+      .order("activated_at", { ascending: false })
+      .is("deactivated_at", null)
+  ]);
 
-  if (activationError) {
-    throw activationError;
+  if (extensionResult.error) {
+    throw extensionResult.error;
   }
 
-  const extensionById = mapExtensionsById((extensionData as LicenseExtensionRow[]) || []);
+  if (activationResult.error) {
+    throw activationResult.error;
+  }
+
+  const extensionById = mapExtensionsById((extensionResult.data as LicenseExtensionRow[]) || []);
   const activationRows =
-    (activationData as Array<
+    (activationResult.data as Array<
       Pick<LicenseActivationRow, "id" | "license_key_id" | "fingerprint" | "activated_at" | "last_checked_at" | "last_version">
     >) || [];
   const activeActivationsByKeyId = new Map<number, LicenseKeyActivationSummary[]>();
@@ -622,6 +623,23 @@ export async function listLicenseActivations(
     activeOnly?: boolean;
   }
 ): Promise<LicenseActivationRecord[]> {
+  let scopedKeyRows: LicenseKeyRow[] | null = null;
+  if (filters?.extensionId) {
+    const { data: scopedKeyData, error: scopedKeyError } = await supabase
+      .from("license_keys")
+      .select("id, extension_id, key_prefix, key_suffix, status, expires_at, note, created_at, updated_at")
+      .eq("extension_id", filters.extensionId);
+
+    if (scopedKeyError) {
+      throw scopedKeyError;
+    }
+
+    scopedKeyRows = (scopedKeyData as LicenseKeyRow[]) || [];
+    if (!scopedKeyRows.length) {
+      return [];
+    }
+  }
+
   let query = supabase
     .from("license_activations")
     .select(
@@ -629,6 +647,10 @@ export async function listLicenseActivations(
     )
     .order("last_checked_at", { ascending: false })
     .range(0, 499);
+
+  if (scopedKeyRows) {
+    query = query.in("license_key_id", scopedKeyRows.map((row) => row.id));
+  }
 
   if (filters?.activeOnly) {
     query = query.is("deactivated_at", null);
@@ -644,17 +666,21 @@ export async function listLicenseActivations(
     return [];
   }
 
-  const keyIds = Array.from(new Set(activationRows.map((row) => row.license_key_id)));
-  const { data: keyData, error: keyError } = await supabase
-    .from("license_keys")
-    .select("id, extension_id, key_prefix, key_suffix, status, expires_at, note, created_at, updated_at")
-    .in("id", keyIds);
+  const keyRows =
+    scopedKeyRows ??
+    (await (async () => {
+      const keyIds = Array.from(new Set(activationRows.map((row) => row.license_key_id)));
+      const { data: keyData, error: keyError } = await supabase
+        .from("license_keys")
+        .select("id, extension_id, key_prefix, key_suffix, status, expires_at, note, created_at, updated_at")
+        .in("id", keyIds);
 
-  if (keyError) {
-    throw keyError;
-  }
+      if (keyError) {
+        throw keyError;
+      }
 
-  const keyRows = (keyData as LicenseKeyRow[]) || [];
+      return (keyData as LicenseKeyRow[]) || [];
+    })());
   const keyById = mapKeysById(keyRows);
   const extensionIds = Array.from(new Set(keyRows.map((row) => row.extension_id)));
 

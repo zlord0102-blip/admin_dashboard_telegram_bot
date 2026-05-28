@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import { supabase } from "@/lib/supabaseClient";
 import { adminApiRequest } from "@/lib/adminOpsClient";
 import { useAdminSession } from "@/components/AdminSessionContext";
-import { RowActionMenu } from "@/components/AdminUi";
+import { PaginationControls, RowActionMenu } from "@/components/AdminUi";
 
 interface PriceTier {
   min_quantity: number;
@@ -49,6 +49,18 @@ interface BotFolder {
 }
 
 type ProductListTab = "visible" | "hidden" | "deleted";
+type ProductListCounts = Record<ProductListTab, number>;
+type ProductFolderCountRow = { bot_folder_id: number | null; is_deleted: boolean };
+type ProductListMetadataRow = ProductFolderCountRow & { is_hidden: boolean };
+
+const PRODUCT_SELECT_COLUMNS =
+  "id, sort_position, bot_folder_id, telegram_icon, telegram_icon_custom_emoji_id, name, price, price_usdt, price_tiers, promo_buy_quantity, promo_bonus_quantity, description, format_data, is_hidden, is_deleted";
+
+const applyProductTabFilter = (query: any, tab: ProductListTab) => {
+  if (tab === "deleted") return query.eq("is_deleted", true);
+  if (tab === "hidden") return query.eq("is_deleted", false).eq("is_hidden", true);
+  return query.eq("is_deleted", false).eq("is_hidden", false);
+};
 
 const parseSortPosition = (value: string): { valid: boolean; value: number | null } => {
   const normalized = value.trim();
@@ -154,6 +166,17 @@ export default function ProductsPage() {
   const renderModal = (content: JSX.Element) =>
     typeof document === "undefined" ? null : createPortal(content, document.body);
   const [products, setProducts] = useState<Product[]>([]);
+  const [productLoading, setProductLoading] = useState(false);
+  const [productPage, setProductPage] = useState(1);
+  const [productPageSize, setProductPageSize] = useState(20);
+  const [productTotalCount, setProductTotalCount] = useState(0);
+  const [productTotalPages, setProductTotalPages] = useState(1);
+  const [productListCounts, setProductListCounts] = useState<ProductListCounts>({
+    visible: 0,
+    hidden: 0,
+    deleted: 0
+  });
+  const [productFolderCountRows, setProductFolderCountRows] = useState<ProductFolderCountRow[]>([]);
   const [folders, setFolders] = useState<BotFolder[]>([]);
   const [productListTab, setProductListTab] = useState<ProductListTab>("visible");
   const [createProductOpen, setCreateProductOpen] = useState(false);
@@ -204,11 +227,21 @@ export default function ProductsPage() {
   const [editTemplateName, setEditTemplateName] = useState("");
   const [editTemplatePattern, setEditTemplatePattern] = useState("");
 
-  const load = async () => {
-    const { data, error } = await supabase
+  const load = async (
+    pageIndex = productPage,
+    nextPageSize = productPageSize,
+    tab = productListTab
+  ) => {
+    setProductLoading(true);
+    const from = (pageIndex - 1) * nextPageSize;
+    const to = from + nextPageSize - 1;
+    const baseQuery = supabase
       .from("products")
-      .select("id, sort_position, bot_folder_id, telegram_icon, telegram_icon_custom_emoji_id, name, price, price_usdt, price_tiers, promo_buy_quantity, promo_bonus_quantity, description, format_data, is_hidden, is_deleted")
-      .order("id");
+      .select(PRODUCT_SELECT_COLUMNS, { count: "exact" });
+    const { data, error, count } = await applyProductTabFilter(baseQuery, tab)
+      .order("sort_position", { ascending: true, nullsFirst: false })
+      .order("id", { ascending: true })
+      .range(from, to);
     if (error) {
       const withoutCustomEmojiFallback = await supabase
         .from("products")
@@ -227,6 +260,9 @@ export default function ProductsPage() {
             is_deleted: Boolean((row as any).is_deleted)
           }))
         );
+        setProductTotalCount(withoutCustomEmojiFallback.data?.length ?? 0);
+        setProductTotalPages(1);
+        setProductLoading(false);
         return;
       }
 
@@ -247,6 +283,9 @@ export default function ProductsPage() {
             is_deleted: Boolean((row as any).is_deleted)
           }))
         );
+        setProductTotalCount(withFolderFallback.data?.length ?? 0);
+        setProductTotalPages(1);
+        setProductLoading(false);
         return;
       }
 
@@ -267,6 +306,9 @@ export default function ProductsPage() {
             is_deleted: Boolean((row as any).is_deleted)
           }))
         );
+        setProductTotalCount(withHiddenFallback.data?.length ?? 0);
+        setProductTotalPages(1);
+        setProductLoading(false);
         return;
       }
 
@@ -290,9 +332,14 @@ export default function ProductsPage() {
           is_deleted: false
         }))
       );
+      setProductTotalCount(fallback.data?.length ?? 0);
+      setProductTotalPages(1);
+      setProductLoading(false);
       return;
     }
     setProductError(null);
+    const nextTotalCount = count ?? data?.length ?? 0;
+    const nextTotalPages = Math.max(1, Math.ceil(nextTotalCount / nextPageSize));
     setProducts(
       ((data as Product[]) || []).map((row) => ({
         ...row,
@@ -304,6 +351,52 @@ export default function ProductsPage() {
         is_deleted: Boolean((row as any).is_deleted)
       }))
     );
+    setProductTotalCount(nextTotalCount);
+    setProductTotalPages(nextTotalPages);
+    if (pageIndex > nextTotalPages) {
+      setProductPage(nextTotalPages);
+    }
+    setProductLoading(false);
+  };
+
+  const countProductsByTab = async (tab: ProductListTab) => {
+    const query = supabase.from("products").select("id", { count: "exact", head: true });
+    const { count, error } = await applyProductTabFilter(query, tab);
+    if (error) throw error;
+    return count ?? 0;
+  };
+
+  const loadProductCounts = async () => {
+    const [visible, hidden, deleted] = await Promise.all([
+      countProductsByTab("visible"),
+      countProductsByTab("hidden"),
+      countProductsByTab("deleted")
+    ]);
+    setProductListCounts({ visible, hidden, deleted });
+  };
+
+  const loadProductListMetadata = async () => {
+    const { data, error } = await supabase
+      .from("products")
+      .select("bot_folder_id, is_hidden, is_deleted");
+    if (error) {
+      await loadProductCounts().catch(() => undefined);
+      setProductFolderCountRows([]);
+      return;
+    }
+
+    const rows: ProductListMetadataRow[] = ((data as Array<Record<string, unknown>>) || []).map((row) => ({
+      bot_folder_id: row.bot_folder_id !== null && row.bot_folder_id !== undefined ? Number(row.bot_folder_id) : null,
+      is_hidden: Boolean((row as any).is_hidden),
+      is_deleted: Boolean((row as any).is_deleted)
+    }));
+
+    setProductListCounts({
+      visible: rows.filter((row) => !row.is_hidden && !row.is_deleted).length,
+      hidden: rows.filter((row) => row.is_hidden && !row.is_deleted).length,
+      deleted: rows.filter((row) => row.is_deleted).length
+    });
+    setProductFolderCountRows(rows.filter((row) => !row.is_deleted));
   };
 
   const loadFolders = async () => {
@@ -345,29 +438,25 @@ export default function ProductsPage() {
   };
 
   useEffect(() => {
-    load();
     loadFolders();
     loadFormats();
   }, []);
 
-  const visibleProducts = useMemo(
-    () => sortProductsByPosition(products.filter((product) => !product.is_deleted && !product.is_hidden)),
-    [products]
-  );
-  const hiddenProducts = useMemo(
-    () => sortProductsByPosition(products.filter((product) => !product.is_deleted && product.is_hidden)),
-    [products]
-  );
-  const deletedProducts = useMemo(
-    () => sortProductsByPosition(products.filter((product) => product.is_deleted)),
-    [products]
-  );
+  useEffect(() => {
+    load(productPage, productPageSize, productListTab).catch((error) => {
+      setProductError(error instanceof Error ? error.message : "Không thể tải danh sách sản phẩm.");
+      setProducts([]);
+      setProductTotalCount(0);
+      setProductTotalPages(1);
+      setProductLoading(false);
+    });
+  }, [productPage, productPageSize, productListTab]);
 
-  const listedProducts = useMemo(() => {
-    if (productListTab === "hidden") return hiddenProducts;
-    if (productListTab === "deleted") return deletedProducts;
-    return visibleProducts;
-  }, [deletedProducts, hiddenProducts, productListTab, visibleProducts]);
+  useEffect(() => {
+    loadProductListMetadata().catch(() => undefined);
+  }, []);
+
+  const listedProducts = useMemo(() => sortProductsByPosition(products), [products]);
 
   const folderOptions = useMemo(() => sortFoldersByPosition(folders), [folders]);
   const folderNameById = useMemo(() => {
@@ -376,13 +465,24 @@ export default function ProductsPage() {
   }, [folderOptions]);
   const folderProductCounts = useMemo(() => {
     const counts = new Map<number, number>();
-    for (const product of products) {
+    for (const product of productFolderCountRows) {
       if (product.is_deleted) continue;
       if (product.bot_folder_id === null || product.bot_folder_id === undefined) continue;
       counts.set(product.bot_folder_id, (counts.get(product.bot_folder_id) || 0) + 1);
     }
     return counts;
-  }, [products]);
+  }, [productFolderCountRows]);
+
+  const refreshProducts = async (
+    pageIndex = productPage,
+    nextPageSize = productPageSize,
+    tab = productListTab
+  ) => {
+    await Promise.all([
+      load(pageIndex, nextPageSize, tab),
+      loadProductListMetadata().catch(() => undefined)
+    ]);
+  };
 
   const addTierRow = () => {
     setPriceTierRows((prev) => [...prev, createTierRow()]);
@@ -520,7 +620,9 @@ export default function ProductsPage() {
     setPromoBuyQuantity("");
     setPromoBonusQuantity("");
     setCreateProductOpen(false);
-    await load();
+    setProductListTab("visible");
+    setProductPage(1);
+    await refreshProducts(1, productPageSize, "visible");
   };
 
   const handleDeleteConfirm = async () => {
@@ -544,7 +646,7 @@ export default function ProductsPage() {
       return;
     }
     setDeleteProduct(null);
-    await load();
+    await refreshProducts();
   };
 
   const handleToggleHidden = async (product: Product) => {
@@ -568,7 +670,7 @@ export default function ProductsPage() {
       );
       return;
     }
-    await load();
+    await refreshProducts();
   };
 
   const handleRestore = async (product: Product) => {
@@ -590,7 +692,7 @@ export default function ProductsPage() {
       );
       return;
     }
-    await load();
+    await refreshProducts();
   };
 
   const startEdit = (product: Product) => {
@@ -705,7 +807,7 @@ export default function ProductsPage() {
 
     setFolderError(null);
     setDeleteFolder(null);
-    await Promise.all([loadFolders(), load()]);
+    await Promise.all([loadFolders(), refreshProducts()]);
   };
 
   const handleUpdate = async (event: React.FormEvent) => {
@@ -764,7 +866,7 @@ export default function ProductsPage() {
     }
     setProductError(null);
     cancelEdit();
-    await load();
+    await refreshProducts();
   };
 
   const handleAddTemplate = async (event: React.FormEvent) => {
@@ -1115,23 +1217,32 @@ export default function ProductsPage() {
           <button
             className={`segmented-button ${productListTab === "visible" ? "active" : ""}`}
             type="button"
-            onClick={() => setProductListTab("visible")}
+            onClick={() => {
+              setProductListTab("visible");
+              setProductPage(1);
+            }}
           >
-            Đang hiển thị ({visibleProducts.length})
+            Đang hiển thị ({productListCounts.visible})
           </button>
           <button
             className={`segmented-button ${productListTab === "hidden" ? "active" : ""}`}
             type="button"
-            onClick={() => setProductListTab("hidden")}
+            onClick={() => {
+              setProductListTab("hidden");
+              setProductPage(1);
+            }}
           >
-            Đang ẩn ({hiddenProducts.length})
+            Đang ẩn ({productListCounts.hidden})
           </button>
           <button
             className={`segmented-button danger ${productListTab === "deleted" ? "active" : ""}`}
             type="button"
-            onClick={() => setProductListTab("deleted")}
+            onClick={() => {
+              setProductListTab("deleted");
+              setProductPage(1);
+            }}
           >
-            Đã xóa mềm ({deletedProducts.length})
+            Đã xóa mềm ({productListCounts.deleted})
           </button>
         </div>
         <table className="table">
@@ -1197,7 +1308,9 @@ export default function ProductsPage() {
             {!listedProducts.length && (
               <tr>
                 <td colSpan={13} className="muted">
-                  {productListTab === "hidden"
+                  {productLoading
+                    ? "Đang tải sản phẩm..."
+                    : productListTab === "hidden"
                     ? "Chưa có sản phẩm đang ẩn."
                     : productListTab === "deleted"
                     ? "Chưa có sản phẩm đã xóa mềm."
@@ -1207,6 +1320,18 @@ export default function ProductsPage() {
             )}
           </tbody>
         </table>
+        <PaginationControls
+          page={productPage}
+          totalPages={productTotalPages}
+          totalCount={productTotalCount}
+          pageSize={productPageSize}
+          disabled={productLoading}
+          onPageChange={setProductPage}
+          onPageSizeChange={(nextPageSize) => {
+            setProductPageSize(nextPageSize);
+            setProductPage(1);
+          }}
+        />
       </div>
 
       {adminSession?.role === "superadmin" && (

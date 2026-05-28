@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
+import { getSupabaseAdminClient } from "@/app/api/_shared/supabaseAdmin";
 import {
   buildMissingRequiredRpcMessage,
   canUseUnsafeMutationFallback
 } from "@/app/api/_shared/mutationFallback";
 import { recordAdminAuditEvent } from "@/app/api/_shared/adminAudit";
+import { withAdminApiTiming } from "@/app/api/_shared/serverTiming";
 
 type FinanceResource = "deposit" | "withdrawal" | "usdt_withdrawal";
 type FinanceAction = "confirm" | "cancel";
@@ -36,6 +38,29 @@ const RPC_BY_ACTION: Record<
     confirm: "admin_confirm_usdt_withdrawal",
     cancel: "admin_cancel_usdt_withdrawal"
   }
+};
+
+const FINANCE_QUEUE_SELECT_BY_RESOURCE: Record<FinanceResource, { table: string; select: string }> = {
+  deposit: {
+    table: "deposits",
+    select: "id, user_id, amount, code, status, created_at"
+  },
+  withdrawal: {
+    table: "withdrawals",
+    select: "id, user_id, amount, momo_phone, status, created_at"
+  },
+  usdt_withdrawal: {
+    table: "usdt_withdrawals",
+    select: "id, user_id, usdt_amount, wallet_address, network, status, created_at"
+  }
+};
+
+const normalizeFinanceResource = (value: string | null): FinanceResource | null =>
+  value === "deposit" || value === "withdrawal" || value === "usdt_withdrawal" ? value : null;
+
+const normalizeStatus = (value: string | null) => {
+  const status = String(value || "pending").trim().toLowerCase();
+  return /^[a-z_]{1,40}$/.test(status) ? status : "pending";
 };
 
 const normalizeRpcData = (data: unknown) => {
@@ -373,7 +398,47 @@ const runFallbackAction = (
   }
 };
 
-export async function POST(request: NextRequest) {
+async function handleGET(request: NextRequest) {
+  const adminSession = await requireAdminSession(request);
+  if (adminSession.ok === false) {
+    return adminSession.response;
+  }
+
+  const url = new URL(request.url);
+  const resource = normalizeFinanceResource(url.searchParams.get("resource"));
+  if (!resource) {
+    return NextResponse.json({ error: "resource không hợp lệ." }, { status: 400 });
+  }
+
+  const status = normalizeStatus(url.searchParams.get("status"));
+  const config = FINANCE_QUEUE_SELECT_BY_RESOURCE[resource];
+  const supabase = getSupabaseAdminClient();
+
+  try {
+    const { data, error } = await supabase
+      .from(config.table)
+      .select(config.select)
+      .eq("status", status)
+      .order("created_at", { ascending: false });
+    if (error) throw error;
+
+    return NextResponse.json({
+      success: true,
+      data: {
+        resource,
+        status,
+        rows: data || []
+      }
+    });
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Không thể tải finance queue snapshot." },
+      { status: 500 }
+    );
+  }
+}
+
+async function handlePOST(request: NextRequest) {
   const adminSession = await requireAdminSession(request);
   if (adminSession.ok === false) {
     return adminSession.response;
@@ -424,3 +489,6 @@ export async function POST(request: NextRequest) {
     data: result.data
   });
 }
+
+export const GET = withAdminApiTiming("GET /api/admin-finance", handleGET);
+export const POST = withAdminApiTiming("POST /api/admin-finance", handlePOST);

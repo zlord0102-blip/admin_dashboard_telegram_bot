@@ -6,8 +6,9 @@ import {
   isTelegramBroadcastJobStale,
   launchTelegramBroadcastJob
 } from "@/app/api/_shared/telegramBroadcastJobs";
+import { withAdminApiTiming } from "@/app/api/_shared/serverTiming";
 
-export async function GET(
+async function handleGET(
   request: NextRequest,
   context: { params: Promise<{ id: string }> }
 ) {
@@ -33,3 +34,5 @@ export async function GET(
 
   return NextResponse.json({ job: snapshot });
 }
+
+export const GET = withAdminApiTiming("GET /api/telegram/broadcast-jobs/[id]", handleGET);

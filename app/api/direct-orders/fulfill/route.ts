@@ -11,6 +11,7 @@ import {
 } from "@/app/api/_shared/directOrderFulfillment";
 import { sendPaymentRelayNotification } from "@/app/api/_shared/paymentRelay";
 import { recordAdminAuditEvent } from "@/app/api/_shared/adminAudit";
+import { withAdminApiTiming } from "@/app/api/_shared/serverTiming";
 
 const rawExpireMinutes = Number(process.env.DIRECT_ORDER_PENDING_EXPIRE_MINUTES || "10");
 const DIRECT_ORDER_PENDING_EXPIRE_MINUTES = Number.isFinite(rawExpireMinutes)
@@ -32,7 +33,7 @@ const buildDisplayName = (user?: {
   return username ? `@${username}` : "-";
 };
 
-export async function POST(request: NextRequest) {
+async function handlePOST(request: NextRequest) {
   let body: { orderId?: number | string };
   try {
     body = await request.json();
@@ -144,3 +145,5 @@ export async function POST(request: NextRequest) {
     }
   });
 }
+
+export const POST = withAdminApiTiming("POST /api/direct-orders/fulfill", handlePOST);

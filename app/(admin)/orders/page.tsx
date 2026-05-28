@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { supabase } from "@/lib/supabaseClient";
+import { PaginationControls } from "@/components/AdminUi";
+import { adminApiGet } from "@/lib/adminOpsClient";
 
 interface OrderRow {
   id: number | string;
@@ -12,92 +13,54 @@ interface OrderRow {
   created_at: string;
 }
 
-interface OrderUserLookupRow {
-  user_id: number | string;
-  username: string | null;
-  first_name: string | null;
-  last_name: string | null;
-}
-
-const buildDisplayName = (user: OrderUserLookupRow) =>
-  [user.first_name, user.last_name]
-    .map((part) => part?.trim())
-    .filter(Boolean)
-    .join(" ")
-    .trim() || null;
+type OrdersSnapshot = {
+  orders: OrderRow[];
+  totalCount: number;
+  usernamesByUserId: Record<string, string | null>;
+  displayNamesByUserId: Record<string, string | null>;
+  productNamesById: Record<string, string>;
+};
 
 export default function OrdersPage() {
-  const PAGE_SIZE = 50;
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [usernamesByUserId, setUsernamesByUserId] = useState<Record<string, string | null>>({});
   const [displayNamesByUserId, setDisplayNamesByUserId] = useState<Record<string, string | null>>({});
   const [productNamesById, setProductNamesById] = useState<Record<string, string>>({});
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [totalCount, setTotalCount] = useState(0);
-  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  const [loading, setLoading] = useState(false);
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
 
-  const load = async (pageIndex: number) => {
-    const from = (pageIndex - 1) * PAGE_SIZE;
-    const to = from + PAGE_SIZE - 1;
+  const load = async (pageIndex: number, nextPageSize = pageSize) => {
+    setLoading(true);
 
-    const { data, count } = await supabase
-      .from("orders")
-      .select("id, user_id, product_id, price, quantity, created_at", { count: "exact" })
-      .order("created_at", { ascending: false })
-      .range(from, to);
-    const rows = (data as OrderRow[]) || [];
-    setOrders(rows);
-    setTotalCount(count ?? 0);
-
-    const userIds = Array.from(
-      new Set(
-        rows
-          .map((order) => order.user_id)
-          .filter((value): value is number | string => value !== null && value !== undefined)
-          .map(String)
-      )
-    );
-    const productIds = Array.from(
-      new Set(
-        rows
-          .map((order) => order.product_id)
-          .filter((value): value is number | string => value !== null && value !== undefined)
-          .map(String)
-      )
-    );
-
-    const [usersRes, productsRes] = await Promise.all([
-      userIds.length
-        ? supabase.from("users").select("user_id, username, first_name, last_name").in("user_id", userIds)
-        : Promise.resolve({
-            data: [] as OrderUserLookupRow[]
-          }),
-      productIds.length
-        ? supabase.from("products").select("id, name").in("id", productIds)
-        : Promise.resolve({ data: [] as Array<{ id: number | string; name: string }> })
-    ]);
-
-    const usernames: Record<string, string | null> = {};
-    const displayNames: Record<string, string | null> = {};
-    for (const user of usersRes.data ?? []) {
-      if (user?.user_id === null || user?.user_id === undefined) continue;
-      usernames[String(user.user_id)] = user.username ?? null;
-      displayNames[String(user.user_id)] = buildDisplayName(user);
+    try {
+      const params = new URLSearchParams({
+        page: String(pageIndex),
+        pageSize: String(nextPageSize)
+      });
+      const snapshot = await adminApiGet<OrdersSnapshot>(`/api/admin/orders?${params.toString()}`);
+      setOrders(snapshot.orders || []);
+      setTotalCount(snapshot.totalCount ?? 0);
+      setUsernamesByUserId(snapshot.usernamesByUserId || {});
+      setDisplayNamesByUserId(snapshot.displayNamesByUserId || {});
+      setProductNamesById(snapshot.productNamesById || {});
+    } finally {
+      setLoading(false);
     }
-    setUsernamesByUserId(usernames);
-    setDisplayNamesByUserId(displayNames);
-
-    const productNames: Record<string, string> = {};
-    for (const product of productsRes.data ?? []) {
-      if (product?.id === null || product?.id === undefined) continue;
-      productNames[String(product.id)] = product.name;
-    }
-    setProductNamesById(productNames);
   };
 
   useEffect(() => {
-    load(page).catch(() => null);
-  }, [page]);
+    load(page, pageSize).catch(() => {
+      setOrders([]);
+      setTotalCount(0);
+      setUsernamesByUserId({});
+      setDisplayNamesByUserId({});
+      setProductNamesById({});
+      setLoading(false);
+    });
+  }, [page, pageSize]);
 
   const formatDateTime = (isoString: string | null | undefined) => {
     if (!isoString) return "-";
@@ -154,32 +117,23 @@ export default function OrdersPage() {
             ))}
             {!orders.length && (
               <tr>
-                <td colSpan={8} className="muted">Chưa có đơn hàng.</td>
+                <td colSpan={8} className="muted">{loading ? "Đang tải đơn hàng..." : "Chưa có đơn hàng."}</td>
               </tr>
             )}
           </tbody>
         </table>
-        {totalPages > 1 && (
-          <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 12 }}>
-            <button
-              className="button secondary"
-              disabled={page === 1}
-              onClick={() => setPage(Math.max(1, page - 1))}
-            >
-              Trang trước
-            </button>
-            <span className="muted">
-              Trang {page}/{totalPages} · Tổng {totalCount.toLocaleString("vi-VN")}
-            </span>
-            <button
-              className="button secondary"
-              disabled={page === totalPages}
-              onClick={() => setPage(Math.min(totalPages, page + 1))}
-            >
-              Trang sau
-            </button>
-          </div>
-        )}
+        <PaginationControls
+          page={page}
+          totalPages={totalPages}
+          totalCount={totalCount}
+          pageSize={pageSize}
+          disabled={loading}
+          onPageChange={setPage}
+          onPageSizeChange={(nextPageSize) => {
+            setPageSize(nextPageSize);
+            setPage(1);
+          }}
+        />
       </div>
     </div>
   );

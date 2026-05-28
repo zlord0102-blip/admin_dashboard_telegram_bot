@@ -235,7 +235,7 @@ export const fetchReportsSnapshot = ({
 
 export const fetchUsersSnapshot = ({
   page = 1,
-  pageSize = 50,
+  pageSize = 20,
   search = "",
   filterMode = "all",
   sortMode = "newest"
@@ -249,7 +249,7 @@ export const fetchUsersSnapshot = ({
   fetchAdminSnapshot<UsersSnapshot>(
     `/api/admin-analytics/users?page=${Math.max(1, Math.trunc(page) || 1)}&pageSize=${Math.max(
       1,
-      Math.min(Math.trunc(pageSize) || 50, 200)
+      Math.min(Math.trunc(pageSize) || 20, 1000)
     )}&q=${encodeURIComponent(search)}&filter=${encodeURIComponent(filterMode)}&sort=${encodeURIComponent(sortMode)}`
   );
 

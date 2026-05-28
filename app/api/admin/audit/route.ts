@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
 import { getSupabaseAdminClient } from "@/app/api/_shared/supabaseAdmin";
+import { withAdminApiTiming } from "@/app/api/_shared/serverTiming";
 
-export async function GET(request: NextRequest) {
+async function handleGET(request: NextRequest) {
   const adminSession = await requireAdminSession(request);
   if (adminSession.ok === false) {
     return adminSession.response;
@@ -31,3 +32,5 @@ export async function GET(request: NextRequest) {
 
   return NextResponse.json({ success: true, data: { logs: data || [] } });
 }
+
+export const GET = withAdminApiTiming("GET /api/admin/audit", handleGET);

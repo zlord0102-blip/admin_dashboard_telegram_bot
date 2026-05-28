@@ -6,7 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { AdminSessionProvider, type AdminSessionSnapshot } from "@/components/AdminSessionContext";
 import { AdminSessionClientError, fetchAdminSessionSnapshot } from "@/lib/adminSessionClient";
-import { fetchAdminOpsHealth, type AdminOpsHealth } from "@/lib/adminOpsClient";
+import { installAdminApiTimingInterceptor } from "@/lib/adminApiTimingClient";
 
 /* ── SVG Icons ────────────────────────────────────────────── */
 const Icons = {
@@ -198,6 +198,10 @@ function getInitials(email: string | null): string {
     .join("");
 }
 
+function needsVerifiedAdminSession(pathname: string) {
+  return pathname === "/products" || pathname.startsWith("/products/");
+}
+
 /* ── Component ────────────────────────────────────────────── */
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -207,10 +211,15 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const [adminSession, setAdminSession] = useState<AdminSessionSnapshot | null>(null);
   const [email, setEmail] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
+  const [accessToken, setAccessToken] = useState("");
+  const [adminSessionVerified, setAdminSessionVerified] = useState(false);
   const [accessDenied, setAccessDenied] = useState(false);
   const [accessError, setAccessError] = useState<string | null>(null);
-  const [opsHealth, setOpsHealth] = useState<AdminOpsHealth | null>(null);
   const [openNavGroups, setOpenNavGroups] = useState<Record<string, boolean>>(getDefaultNavGroupState);
+
+  useEffect(() => {
+    installAdminApiTimingInterceptor();
+  }, []);
 
   useEffect(() => {
     const loadSession = async () => {
@@ -221,12 +230,13 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
         setEmail(session.user.email ?? null);
         setUserId(session.user.id);
-
-        const nextAdminSession = await fetchAdminSessionSnapshot(session.access_token);
-        setAdminSession(nextAdminSession);
-        setEmail(nextAdminSession.email ?? session.user.email ?? null);
-        setUserId(nextAdminSession.userId || session.user.id);
-        fetchAdminOpsHealth().then(setOpsHealth).catch(() => setOpsHealth(null));
+        setAccessToken(session.access_token);
+        setAdminSession({
+          userId: session.user.id,
+          email: session.user.email ?? null,
+          role: "admin"
+        });
+        setAdminSessionVerified(false);
         setAccessDenied(false);
         setAccessError(null);
       } catch (error) {
@@ -242,6 +252,40 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     };
     loadSession();
   }, [router]);
+
+  useEffect(() => {
+    if (!accessToken || adminSessionVerified || !needsVerifiedAdminSession(pathname)) {
+      return;
+    }
+
+    let cancelled = false;
+    const verifyAdminSession = async () => {
+      try {
+        const nextAdminSession = await fetchAdminSessionSnapshot(accessToken);
+        if (cancelled) return;
+        setAdminSession(nextAdminSession);
+        setEmail(nextAdminSession.email ?? email);
+        setUserId(nextAdminSession.userId || userId);
+        setAdminSessionVerified(true);
+        setAccessDenied(false);
+        setAccessError(null);
+      } catch (error) {
+        if (cancelled) return;
+        if (error instanceof AdminSessionClientError && error.status === 401) {
+          router.replace("/login");
+          return;
+        }
+        setAdminSession(null);
+        setAccessDenied(true);
+        setAccessError(error instanceof Error ? error.message : "Không thể tải phiên admin.");
+      }
+    };
+
+    verifyAdminSession();
+    return () => {
+      cancelled = true;
+    };
+  }, [accessToken, adminSessionVerified, email, pathname, router, userId]);
 
   useEffect(() => { setMobileNavOpen(false); }, [pathname]);
 
@@ -271,21 +315,6 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       return next;
     });
   };
-
-  const healthTone =
-    !opsHealth ? "unknown"
-    : opsHealth.queues.deliveryOutbox.failed > 0 ||
-      opsHealth.queues.pendingDirectOrdersExpired > 0 ||
-      (opsHealth.binancePayWebhookAlerts || []).some((alert) => alert.severity === "critical") ? "danger"
-    : opsHealth.stock.count > 0 ||
-      opsHealth.queues.deliveryOutbox.retryDue > 0 ||
-      (opsHealth.binancePayWebhookAlerts || []).some((alert) => alert.severity === "warning") ? "warning"
-    : "healthy";
-
-  const totalPending = opsHealth
-    ? opsHealth.queues.pendingDeposits + opsHealth.queues.pendingWithdrawals +
-      opsHealth.queues.pendingUsdtWithdrawals + opsHealth.queues.pendingDirectOrders
-    : 0;
 
   /* ── Loading ── */
   if (loading) {
@@ -396,12 +425,10 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           {/* Health + Switch */}
           <div className="dashboard-switch-card">
             <div className="sidebar-health-row">
-              <div className={`ops-health-dot ${healthTone}`}>
-                {healthTone === "healthy" ? "Ops OK" : `Ops ${healthTone}`}
+              <div className="ops-health-dot unknown">
+                Ops check
               </div>
-              {opsHealth && totalPending > 0 && (
-                <span className="sidebar-metric">{totalPending} pending</span>
-              )}
+              <Link href="/health" className="sidebar-metric">System Health</Link>
             </div>
             <Link className="button secondary dashboard-switch-link" href="/website">
               {Icons.switch}&nbsp;Website Dashboard

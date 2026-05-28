@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { supabase } from "@/lib/supabaseClient";
-import { performAdminFinanceAction } from "@/lib/adminFinanceClient";
+import { fetchAdminFinanceQueue, performAdminFinanceAction } from "@/lib/adminFinanceClient";
 import { ConfirmDialog, RowActionMenu } from "@/components/AdminUi";
 
 interface Deposit {
@@ -24,16 +23,12 @@ export default function DepositsPage() {
   const [pendingAction, setPendingAction] = useState<PendingDepositAction>(null);
 
   const load = async () => {
-    const { data } = await supabase
-      .from("deposits")
-      .select("id, user_id, amount, code, status, created_at")
-      .eq("status", "pending")
-      .order("created_at", { ascending: false });
-    setDeposits((data as Deposit[]) || []);
+    const snapshot = await fetchAdminFinanceQueue<Deposit>("deposit");
+    setDeposits(snapshot.rows || []);
   };
 
   useEffect(() => {
-    load();
+    load().catch(() => setDeposits([]));
   }, []);
 
   const confirmDeposit = async (deposit: Deposit) => {

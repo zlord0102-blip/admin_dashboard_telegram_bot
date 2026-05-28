@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  ConfirmDialog,
   DataTable,
   EmptyState,
   PageHeader,
@@ -39,6 +40,7 @@ type SaleItem = {
   campaign_id: number;
   product_id: number;
   sale_name: string | null;
+  sale_description: string | null;
   sale_price_vnd: number;
   sale_price_usdt: number | null;
   original_price_vnd: number | null;
@@ -49,6 +51,7 @@ type SaleItem = {
   quantity_limit: number | null;
   per_user_limit: number | null;
   telegram_icon_custom_emoji_id: string | null;
+  sort_position: number | null;
   is_enabled: boolean;
   products?: { id: number; name: string; price: number; price_usdt?: number | null } | null;
   reservation_stats: { available: number; held: number; sold: number; released: number };
@@ -81,6 +84,35 @@ const toDateTimeLocal = (date: Date) => {
 const defaultStartsAt = () => toDateTimeLocal(new Date());
 const defaultEndsAt = () => toDateTimeLocal(new Date(Date.now() + 24 * 60 * 60 * 1000));
 
+const createDefaultCampaignForm = () => ({
+  name: "",
+  status: "scheduled",
+  startsAt: defaultStartsAt(),
+  endsAt: defaultEndsAt(),
+  totalQuantityLimit: "",
+  perUserLimit: "",
+  notifyOnStart: false,
+  notifyEndingSoon: true,
+  notes: ""
+});
+
+const createDefaultItemForm = () => ({
+  campaignId: "",
+  productId: "",
+  saleName: "",
+  saleDescription: "",
+  salePriceVnd: "",
+  salePriceUsdt: "",
+  stockQuantity: "10",
+  newStockText: "",
+  quantityLimit: "",
+  perUserLimit: "",
+  promoBuyQuantity: "0",
+  promoBonusQuantity: "0",
+  telegramIconCustomEmojiId: DEFAULT_SALE_CUSTOM_EMOJI_ID,
+  sortPosition: ""
+});
+
 const campaignStatusTone = (status: string): "neutral" | "success" | "warning" | "danger" => {
   if (status === "active") return "success";
   if (status === "scheduled" || status === "paused" || status === "draft") return "warning";
@@ -110,36 +142,17 @@ export default function SalesPage() {
   const [notice, setNotice] = useState("");
   const [campaignModalOpen, setCampaignModalOpen] = useState(false);
   const [itemModalOpen, setItemModalOpen] = useState(false);
+  const [editingCampaign, setEditingCampaign] = useState<SaleCampaign | null>(null);
+  const [editingItem, setEditingItem] = useState<SaleItem | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<
+    | { type: "campaign"; campaign: SaleCampaign }
+    | { type: "item"; item: SaleItem }
+    | null
+  >(null);
   const [stockMode, setStockMode] = useState<"existing" | "new">("existing");
 
-  const [campaignForm, setCampaignForm] = useState({
-    name: "",
-    status: "scheduled",
-    startsAt: defaultStartsAt(),
-    endsAt: defaultEndsAt(),
-    totalQuantityLimit: "",
-    perUserLimit: "",
-    notifyOnStart: false,
-    notifyEndingSoon: true,
-    notes: ""
-  });
-
-  const [itemForm, setItemForm] = useState({
-    campaignId: "",
-    productId: "",
-    saleName: "",
-    saleDescription: "",
-    salePriceVnd: "",
-    salePriceUsdt: "",
-    stockQuantity: "10",
-    newStockText: "",
-    quantityLimit: "",
-    perUserLimit: "",
-    promoBuyQuantity: "0",
-    promoBonusQuantity: "0",
-    telegramIconCustomEmojiId: DEFAULT_SALE_CUSTOM_EMOJI_ID,
-    sortPosition: ""
-  });
+  const [campaignForm, setCampaignForm] = useState(createDefaultCampaignForm);
+  const [itemForm, setItemForm] = useState(createDefaultItemForm);
 
   const load = async () => {
     setLoading(true);
@@ -223,44 +236,137 @@ export default function SalesPage() {
       });
       setNotice(successMessage);
       await load();
+      return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Không thể cập nhật Sale.");
+      return false;
     } finally {
       setSaving(false);
     }
   };
 
-  const createCampaign = async () => {
-    await runAction(
+  const openCreateCampaign = () => {
+    setEditingCampaign(null);
+    setCampaignForm(createDefaultCampaignForm());
+    setCampaignModalOpen(true);
+  };
+
+  const openCreateItem = () => {
+    setEditingItem(null);
+    setStockMode("existing");
+    setItemForm((prev) => ({
+      ...createDefaultItemForm(),
+      campaignId: prev.campaignId || String(activeCampaigns[0]?.id ?? ""),
+      productId: prev.productId || String(data.products[0]?.id ?? "")
+    }));
+    setItemModalOpen(true);
+  };
+
+  const submitCampaign = async () => {
+    const ok = await runAction(
       {
-        action: "create_campaign",
+        action: editingCampaign ? "update_campaign" : "create_campaign",
+        campaignId: editingCampaign?.id,
         ...campaignForm
       },
-      "Đã tạo campaign Sale."
+      editingCampaign ? "Đã cập nhật campaign Sale." : "Đã tạo campaign Sale."
     );
-    setCampaignForm((prev) => ({ ...prev, name: "", notes: "" }));
+    if (!ok) return;
+    setCampaignForm(createDefaultCampaignForm());
+    setEditingCampaign(null);
     setCampaignModalOpen(false);
   };
 
-  const addSaleItem = async () => {
-    await runAction(
+  const submitSaleItem = async () => {
+    const ok = await runAction(
       {
-        action: stockMode === "new" ? "add_item_new_stock" : "add_item_existing_stock",
+        action: editingItem ? "update_item" : stockMode === "new" ? "add_item_new_stock" : "add_item_existing_stock",
+        saleItemId: editingItem?.id,
         ...itemForm,
         stockQuantity: stockMode === "new" ? String(newStockLineCount) : itemForm.stockQuantity,
         telegramIconCustomEmojiId: itemForm.telegramIconCustomEmojiId || DEFAULT_SALE_CUSTOM_EMOJI_ID
       },
-      "Đã thêm món Sale và reserve stock."
+      editingItem ? "Đã cập nhật món Sale." : "Đã thêm món Sale và reserve stock."
     );
+    if (!ok) return;
     setItemForm((prev) => ({
       ...prev,
       saleName: "",
       saleDescription: "",
       salePriceVnd: "",
+      salePriceUsdt: "",
       newStockText: "",
       stockQuantity: stockMode === "new" ? "0" : prev.stockQuantity
     }));
+    setEditingItem(null);
     setItemModalOpen(false);
+  };
+
+  const startEditCampaign = (campaign: SaleCampaign) => {
+    setEditingCampaign(campaign);
+    setCampaignForm({
+      name: campaign.name,
+      status: campaign.status,
+      startsAt: toDateTimeLocal(new Date(campaign.starts_at)),
+      endsAt: toDateTimeLocal(new Date(campaign.ends_at)),
+      totalQuantityLimit: campaign.total_quantity_limit ? String(campaign.total_quantity_limit) : "",
+      perUserLimit: campaign.per_user_limit ? String(campaign.per_user_limit) : "",
+      notifyOnStart: Boolean(campaign.notify_on_start),
+      notifyEndingSoon: Boolean(campaign.notify_ending_soon),
+      notes: campaign.notes || ""
+    });
+    setCampaignModalOpen(true);
+  };
+
+  const startEditItem = (item: SaleItem) => {
+    setEditingItem(item);
+    setStockMode("existing");
+    setItemForm({
+      campaignId: String(item.campaign_id),
+      productId: String(item.product_id),
+      saleName: item.sale_name || "",
+      saleDescription: item.sale_description || "",
+      salePriceVnd: String(item.sale_price_vnd ?? ""),
+      salePriceUsdt: item.sale_price_usdt !== null && item.sale_price_usdt !== undefined ? String(item.sale_price_usdt) : "",
+      stockQuantity: String(itemStockTotal(item) || item.quantity_limit || 0),
+      newStockText: "",
+      quantityLimit: item.quantity_limit ? String(item.quantity_limit) : "",
+      perUserLimit: item.per_user_limit ? String(item.per_user_limit) : "",
+      promoBuyQuantity: String(item.promo_buy_quantity || 0),
+      promoBonusQuantity: String(item.promo_bonus_quantity || 0),
+      telegramIconCustomEmojiId: item.telegram_icon_custom_emoji_id || DEFAULT_SALE_CUSTOM_EMOJI_ID,
+      sortPosition: item.sort_position ? String(item.sort_position) : ""
+    });
+    setItemModalOpen(true);
+  };
+
+  const closeCampaignModal = () => {
+    if (saving) return;
+    setCampaignModalOpen(false);
+    setEditingCampaign(null);
+  };
+
+  const closeItemModal = () => {
+    if (saving) return;
+    setItemModalOpen(false);
+    setEditingItem(null);
+  };
+
+  const confirmDeleteTarget = async () => {
+    if (!deleteTarget) return;
+    const ok =
+      deleteTarget.type === "campaign"
+        ? await runAction(
+            { action: "delete_campaign", campaignId: deleteTarget.campaign.id },
+            "Đã xóa campaign Sale."
+          )
+        : await runAction(
+            { action: "delete_item", saleItemId: deleteTarget.item.id },
+            "Đã xóa món Sale."
+          );
+    if (ok) {
+      setDeleteTarget(null);
+    }
   };
 
   if (loading) {
@@ -276,10 +382,10 @@ export default function SalesPage() {
         actions={
           <>
             <button className="button secondary" type="button" onClick={load} disabled={saving}>Tải lại</button>
-            <button className="button secondary" type="button" onClick={() => setCampaignModalOpen(true)}>
+            <button className="button secondary" type="button" onClick={openCreateCampaign}>
               Tạo campaign
             </button>
-            <button className="button" type="button" onClick={() => setItemModalOpen(true)}>
+            <button className="button" type="button" onClick={openCreateItem}>
               Thêm món Sale
             </button>
           </>
@@ -369,6 +475,11 @@ export default function SalesPage() {
                   <td className="row-actions-cell">
                     <RowActionMenu items={[
                       {
+                        label: "Chỉnh sửa",
+                        disabled: saving,
+                        onSelect: () => startEditCampaign(campaign)
+                      },
+                      {
                         label: "Active",
                         disabled: saving,
                         onSelect: () => runAction({ action: "set_campaign_status", campaignId: campaign.id, status: "active" }, "Đã active campaign.")
@@ -383,6 +494,12 @@ export default function SalesPage() {
                         tone: "danger",
                         disabled: saving,
                         onSelect: () => runAction({ action: "set_campaign_status", campaignId: campaign.id, status: "ended" }, "Đã kết thúc campaign.")
+                      },
+                      {
+                        label: "Xóa campaign",
+                        tone: "danger",
+                        disabled: saving,
+                        onSelect: () => setDeleteTarget({ type: "campaign", campaign })
                       }
                     ]} />
                   </td>
@@ -458,10 +575,21 @@ export default function SalesPage() {
                   <td className="row-actions-cell">
                     <RowActionMenu items={[
                       {
+                        label: "Chỉnh sửa",
+                        disabled: saving,
+                        onSelect: () => startEditItem(item)
+                      },
+                      {
                         label: item.is_enabled ? "Tắt" : "Bật",
                         tone: item.is_enabled ? "warning" : undefined,
                         disabled: saving,
                         onSelect: () => runAction({ action: "set_item_enabled", saleItemId: item.id, enabled: !item.is_enabled }, item.is_enabled ? "Đã tắt món Sale." : "Đã bật món Sale.")
+                      },
+                      {
+                        label: "Xóa món Sale",
+                        tone: "danger",
+                        disabled: saving,
+                        onSelect: () => setDeleteTarget({ type: "item", item })
                       }
                     ]} />
                   </td>
@@ -479,7 +607,7 @@ export default function SalesPage() {
       </SectionCard>
 
       {campaignModalOpen && (
-        <div className="modal-backdrop" onClick={() => !saving && setCampaignModalOpen(false)}>
+        <div className="modal-backdrop" onClick={closeCampaignModal}>
           <div
             aria-labelledby="sale-campaign-modal-title"
             aria-modal="true"
@@ -490,7 +618,9 @@ export default function SalesPage() {
             <div className="sale-modal-head">
               <div>
                 <div className="sales-kicker">Campaign</div>
-                <h3 className="section-title" id="sale-campaign-modal-title">Tạo Campaign Sale</h3>
+                <h3 className="section-title" id="sale-campaign-modal-title">
+                  {editingCampaign ? "Chỉnh sửa Campaign Sale" : "Tạo Campaign Sale"}
+                </h3>
               </div>
               <StatusPill tone="warning">{campaignForm.status}</StatusPill>
             </div>
@@ -498,7 +628,7 @@ export default function SalesPage() {
               className="form-grid sale-form-grid"
               onSubmit={(event) => {
                 event.preventDefault();
-                createCampaign();
+                submitCampaign();
               }}
             >
               <label>
@@ -511,6 +641,9 @@ export default function SalesPage() {
                   <option value="scheduled">Scheduled</option>
                   <option value="active">Active</option>
                   <option value="draft">Draft</option>
+                  {editingCampaign && <option value="paused">Paused</option>}
+                  {editingCampaign && <option value="ended">Ended</option>}
+                  {editingCampaign && <option value="cancelled">Cancelled</option>}
                 </select>
               </label>
               <label>
@@ -542,8 +675,10 @@ export default function SalesPage() {
                 <span>Notify sắp kết thúc</span>
               </label>
               <div className="modal-actions">
-                <button className="button" type="submit" disabled={saving}>{saving ? "Đang tạo..." : "Tạo campaign"}</button>
-                <button className="button secondary" type="button" onClick={() => setCampaignModalOpen(false)} disabled={saving}>Hủy</button>
+                <button className="button" type="submit" disabled={saving}>
+                  {saving ? "Đang lưu..." : editingCampaign ? "Lưu campaign" : "Tạo campaign"}
+                </button>
+                <button className="button secondary" type="button" onClick={closeCampaignModal} disabled={saving}>Hủy</button>
               </div>
             </form>
           </div>
@@ -551,7 +686,7 @@ export default function SalesPage() {
       )}
 
       {itemModalOpen && (
-        <div className="modal-backdrop" onClick={() => !saving && setItemModalOpen(false)}>
+        <div className="modal-backdrop" onClick={closeItemModal}>
           <div
             aria-labelledby="sale-item-modal-title"
             aria-modal="true"
@@ -562,13 +697,20 @@ export default function SalesPage() {
             <div className="modal-scroll-region">
               <div className="section-head sale-item-head">
                 <div>
-                  <h3 className="section-title" id="sale-item-modal-title">Thêm món Sale</h3>
-                  <p className="muted" style={{ marginTop: 8 }}>Reserve stock có sẵn hoặc thêm stock mới rồi đưa vào campaign ngay.</p>
+                  <h3 className="section-title" id="sale-item-modal-title">
+                    {editingItem ? "Chỉnh sửa món Sale" : "Thêm món Sale"}
+                  </h3>
+                  <p className="muted" style={{ marginTop: 8 }}>
+                    {editingItem
+                      ? "Chỉnh giá, giới hạn, mô tả và icon. Stock đã reserve không đổi trong chế độ sửa."
+                      : "Reserve stock có sẵn hoặc thêm stock mới rồi đưa vào campaign ngay."}
+                  </p>
                 </div>
                 <div className="segmented">
                   <button
                     className={`segmented-button ${stockMode === "existing" ? "active" : ""}`}
                     type="button"
+                    disabled={Boolean(editingItem)}
                     onClick={() => setStockMode("existing")}
                   >
                     Stock có sẵn
@@ -576,6 +718,7 @@ export default function SalesPage() {
                   <button
                     className={`segmented-button ${stockMode === "new" ? "active" : ""}`}
                     type="button"
+                    disabled={Boolean(editingItem)}
                     onClick={() => {
                       setStockMode("new");
                       setItemForm((prev) => ({ ...prev, stockQuantity: String(countStockLines(prev.newStockText)) }));
@@ -589,18 +732,28 @@ export default function SalesPage() {
                 className="form-grid sale-form-grid"
                 onSubmit={(event) => {
                   event.preventDefault();
-                  addSaleItem();
+                  submitSaleItem();
                 }}
               >
                 <label>
                   Campaign
-                  <select value={itemForm.campaignId} onChange={(e) => setItemForm({ ...itemForm, campaignId: e.target.value })}>
-                    {activeCampaigns.map((campaign) => <option key={campaign.id} value={campaign.id}>{campaign.name}</option>)}
+                  <select
+                    value={itemForm.campaignId}
+                    disabled={Boolean(editingItem)}
+                    onChange={(e) => setItemForm({ ...itemForm, campaignId: e.target.value })}
+                  >
+                    {(editingItem ? data.campaigns : activeCampaigns).map((campaign) => (
+                      <option key={campaign.id} value={campaign.id}>{campaign.name}</option>
+                    ))}
                   </select>
                 </label>
                 <label>
                   Sản phẩm gốc
-                  <select value={itemForm.productId} onChange={(e) => setItemForm({ ...itemForm, productId: e.target.value })}>
+                  <select
+                    value={itemForm.productId}
+                    disabled={Boolean(editingItem)}
+                    onChange={(e) => setItemForm({ ...itemForm, productId: e.target.value })}
+                  >
                     {data.products.map((product) => <option key={product.id} value={product.id}>{product.name} - {formatMoney(product.price)}</option>)}
                   </select>
                 </label>
@@ -621,10 +774,12 @@ export default function SalesPage() {
                   <input
                     value={stockMode === "new" ? String(newStockLineCount) : itemForm.stockQuantity}
                     onChange={(e) => setItemForm({ ...itemForm, stockQuantity: e.target.value })}
-                    disabled={stockMode === "new"}
+                    disabled={stockMode === "new" || Boolean(editingItem)}
                   />
                   <span className="sale-field-hint">
-                    {stockMode === "new"
+                    {editingItem
+                      ? "Không đổi số stock đã reserve khi chỉnh sửa."
+                      : stockMode === "new"
                       ? "Tự tính bằng số dòng stock mới bên dưới."
                       : "Số stock có sẵn sẽ được reserve vào Sale."}
                   </span>
@@ -667,14 +822,27 @@ export default function SalesPage() {
               </form>
             </div>
             <div className="modal-actions">
-              <button className="button" type="button" disabled={saving || !canSubmitSaleItem} onClick={addSaleItem}>
-                {saving ? "Đang thêm..." : "Thêm món Sale"}
+              <button className="button" type="button" disabled={saving || (!editingItem && !canSubmitSaleItem)} onClick={submitSaleItem}>
+                {saving ? "Đang lưu..." : editingItem ? "Lưu món Sale" : "Thêm món Sale"}
               </button>
-              <button className="button secondary" type="button" onClick={() => setItemModalOpen(false)} disabled={saving}>Hủy</button>
+              <button className="button secondary" type="button" onClick={closeItemModal} disabled={saving}>Hủy</button>
             </div>
           </div>
         </div>
       )}
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        title={deleteTarget?.type === "campaign" ? "Xóa campaign Sale?" : "Xóa món Sale?"}
+        description={
+          deleteTarget?.type === "campaign"
+            ? `Campaign "${deleteTarget.campaign.name}" và các món Sale trong campaign sẽ bị xóa khỏi Dashboard/Bot. Đơn cũ sẽ giữ lịch sử nhưng mất liên kết Sale.`
+            : `Món "${deleteTarget?.item.sale_name || deleteTarget?.item.products?.name || "#" + String(deleteTarget?.item.product_id || "")}" sẽ bị xóa, các reservation liên quan được giải phóng theo cascade.`
+        }
+        confirmLabel="Xóa"
+        busy={saving}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={confirmDeleteTarget}
+      />
     </div>
   );
 }

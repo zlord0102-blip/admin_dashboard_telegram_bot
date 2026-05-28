@@ -5,10 +5,12 @@ import {
   fetchDashboardSnapshot,
   type DashboardOrderRow,
   type DashboardSnapshot,
-  type DashboardStats
+  type DashboardStats,
+  fetchUsersSnapshot,
+  type UserSnapshotRow
 } from "@/lib/adminAnalyticsClient";
-import { PageHeader, StatCard, StatusPill, SectionCard, DataTable, EmptyState, SkeletonStats, SkeletonTable } from "@/components/AdminUi";
-import { fetchAdminOpsHealth, type AdminOpsHealth } from "@/lib/adminOpsClient";
+import { PageHeader, StatCard, SectionCard, DataTable, EmptyState, PaginationControls, SkeletonTable } from "@/components/AdminUi";
+import { supabase } from "@/lib/supabaseClient";
 
 /* ── Icons ──────────────────────────────────────────────────── */
 const IcoUsers = () => (
@@ -34,17 +36,6 @@ const IcoPending = () => (
     <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
   </svg>
 );
-const IcoAlert = () => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
-    <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
-  </svg>
-);
-const IcoBox = () => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
-  </svg>
-);
 const IcoRefresh = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
     <polyline points="23 4 23 10 17 10"/>
@@ -55,6 +46,53 @@ const IcoRefresh = () => (
 /* ── Helpers ────────────────────────────────────────────────── */
 const fmtVND = (n: number) => n.toLocaleString("vi-VN") + "₫";
 const fmtNum = (n: number) => n.toLocaleString("vi-VN");
+const DRILLDOWN_PAGE_SIZE = 20;
+
+type DrilldownType = "users" | "orders" | "revenue" | "pending";
+
+type DrilldownRow =
+  | UserSnapshotRow
+  | DashboardDrilldownOrder
+  | DashboardPendingRow;
+
+type DashboardDrilldownOrder = {
+  id: number | string;
+  user_id: number | string;
+  username: string | null;
+  display_name: string | null;
+  product_id: number | string;
+  product_name: string;
+  price: number;
+  quantity: number;
+  created_at: string;
+};
+
+type DashboardPendingRow = {
+  id: number | string;
+  type: "deposit" | "withdrawal";
+  user_id: number | string;
+  amount: number;
+  code: string | null;
+  status: string;
+  created_at: string;
+};
+
+type DrilldownState = {
+  type: DrilldownType;
+  title: string;
+  page: number;
+  totalCount: number;
+  loading: boolean;
+  error: string | null;
+  rows: DrilldownRow[];
+};
+
+const drilldownTitles: Record<DrilldownType, string> = {
+  users: "Người dùng",
+  orders: "Đơn hàng",
+  revenue: "Chi tiết doanh thu",
+  pending: "Hàng chờ duyệt"
+};
 
 function formatDateTime(iso: string | null | undefined) {
   if (!iso) return "–";
@@ -78,24 +116,20 @@ export default function DashboardPage() {
   const [orders, setOrders] = useState<DashboardOrderRow[]>([]);
   const [pendingDeposits, setPendingDeposits] = useState(0);
   const [pendingWithdrawals, setPendingWithdrawals] = useState(0);
-  const [health, setHealth] = useState<AdminOpsHealth | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [drilldown, setDrilldown] = useState<DrilldownState | null>(null);
 
   const loadDashboard = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     else setRefreshing(true);
     try {
-      const [snapshot, healthSnapshot]: [DashboardSnapshot, AdminOpsHealth | null] = await Promise.all([
-        fetchDashboardSnapshot(),
-        fetchAdminOpsHealth(5).catch(() => null)
-      ]);
+      const snapshot: DashboardSnapshot = await fetchDashboardSnapshot();
       setStats(snapshot.stats);
       setOrders(snapshot.orders);
       setPendingDeposits(snapshot.pendingDeposits);
       setPendingWithdrawals(snapshot.pendingWithdrawals);
-      setHealth(healthSnapshot);
       setLoadError(null);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : "Không thể tải Dashboard.");
@@ -108,6 +142,189 @@ export default function DashboardPage() {
   useEffect(() => { loadDashboard(); }, [loadDashboard]);
 
   const totalPending = pendingDeposits + pendingWithdrawals;
+
+  const openDrilldown = (type: DrilldownType) => {
+    setDrilldown({
+      type,
+      title: drilldownTitles[type],
+      page: 1,
+      totalCount: 0,
+      loading: true,
+      error: null,
+      rows: []
+    });
+  };
+
+  const closeDrilldown = () => setDrilldown(null);
+
+  const setDrilldownPage = (page: number) => {
+    setDrilldown((current) => current ? { ...current, page, loading: true, error: null } : current);
+  };
+
+  const loadOrderLikeDrilldown = useCallback(async (page: number) => {
+    const from = (page - 1) * DRILLDOWN_PAGE_SIZE;
+    const to = from + DRILLDOWN_PAGE_SIZE - 1;
+    const { data, count, error } = await supabase
+      .from("orders")
+      .select("id, user_id, product_id, price, quantity, created_at", { count: "exact" })
+      .order("created_at", { ascending: false })
+      .range(from, to);
+    if (error) throw error;
+
+    const rows = (data || []) as Array<Record<string, unknown>>;
+    const userIds = Array.from(new Set(rows.map((row) => row.user_id).filter(Boolean).map(String)));
+    const productIds = Array.from(new Set(rows.map((row) => row.product_id).filter(Boolean).map(String)));
+    const [usersRes, productsRes] = await Promise.all([
+      userIds.length
+        ? supabase.from("users").select("user_id, username, first_name, last_name").in("user_id", userIds)
+        : Promise.resolve({ data: [] as Array<Record<string, unknown>> }),
+      productIds.length
+        ? supabase.from("products").select("id, name").in("id", productIds)
+        : Promise.resolve({ data: [] as Array<Record<string, unknown>> })
+    ]);
+
+    const usersById = new Map<string, { username: string | null; display_name: string | null }>();
+    for (const user of usersRes.data || []) {
+      const userId = String(user.user_id || "");
+      if (!userId) continue;
+      const displayName = [user.first_name, user.last_name]
+        .map((part) => String(part || "").trim())
+        .filter(Boolean)
+        .join(" ") || null;
+      usersById.set(userId, {
+        username: user.username ? String(user.username) : null,
+        display_name: displayName
+      });
+    }
+
+    const productNamesById = new Map<string, string>();
+    for (const product of productsRes.data || []) {
+      productNamesById.set(String(product.id), String(product.name || `#${String(product.id || "-")}`));
+    }
+
+    return {
+      totalCount: count ?? 0,
+      rows: rows.map((row) => {
+        const userProfile = usersById.get(String(row.user_id));
+        return {
+          id: row.id as number | string,
+          user_id: row.user_id as number | string,
+          username: userProfile?.username ?? null,
+          display_name: userProfile?.display_name ?? null,
+          product_id: row.product_id as number | string,
+          product_name: productNamesById.get(String(row.product_id)) || `#${String(row.product_id || "-")}`,
+          price: Number(row.price || 0),
+          quantity: Number(row.quantity || 0),
+          created_at: String(row.created_at || "")
+        };
+      })
+    };
+  }, []);
+
+  const loadPendingDrilldown = useCallback(async (page: number) => {
+    const fetchLimit = page * DRILLDOWN_PAGE_SIZE;
+    const [depositsRes, withdrawalsRes] = await Promise.all([
+      supabase
+        .from("deposits")
+        .select("id, user_id, amount, code, status, created_at", { count: "exact" })
+        .eq("status", "pending")
+        .order("created_at", { ascending: false })
+        .range(0, fetchLimit - 1),
+      supabase
+        .from("withdrawals")
+        .select("id, user_id, amount, momo_phone, status, created_at", { count: "exact" })
+        .eq("status", "pending")
+        .order("created_at", { ascending: false })
+        .range(0, fetchLimit - 1)
+    ]);
+    if (depositsRes.error) throw depositsRes.error;
+    if (withdrawalsRes.error) throw withdrawalsRes.error;
+
+    const depositRows: DashboardPendingRow[] = ((depositsRes.data || []) as Array<Record<string, unknown>>).map((row) => ({
+      id: row.id as number | string,
+      type: "deposit",
+      user_id: row.user_id as number | string,
+      amount: Number(row.amount || 0),
+      code: row.code ? String(row.code) : null,
+      status: String(row.status || "pending"),
+      created_at: String(row.created_at || "")
+    }));
+    const withdrawalRows: DashboardPendingRow[] = ((withdrawalsRes.data || []) as Array<Record<string, unknown>>).map((row) => ({
+      id: row.id as number | string,
+      type: "withdrawal",
+      user_id: row.user_id as number | string,
+      amount: Number(row.amount || 0),
+      code: row.momo_phone ? String(row.momo_phone) : null,
+      status: String(row.status || "pending"),
+      created_at: String(row.created_at || "")
+    }));
+    const mergedRows = [...depositRows, ...withdrawalRows]
+      .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
+      .slice((page - 1) * DRILLDOWN_PAGE_SIZE, page * DRILLDOWN_PAGE_SIZE);
+
+    return {
+      totalCount: (depositsRes.count ?? 0) + (withdrawalsRes.count ?? 0),
+      rows: mergedRows
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!drilldown) return;
+    let cancelled = false;
+
+    const loadDrilldown = async () => {
+      try {
+        if (drilldown.type === "users") {
+          const snapshot = await fetchUsersSnapshot({
+            page: drilldown.page,
+            pageSize: DRILLDOWN_PAGE_SIZE,
+            search: "",
+            filterMode: "all",
+            sortMode: "newest"
+          });
+          if (cancelled) return;
+          setDrilldown((current) => current ? {
+            ...current,
+            rows: snapshot.users,
+            totalCount: snapshot.totalCount,
+            loading: false,
+            error: null
+          } : current);
+          return;
+        }
+
+        const result = drilldown.type === "pending"
+          ? await loadPendingDrilldown(drilldown.page)
+          : await loadOrderLikeDrilldown(drilldown.page);
+        if (cancelled) return;
+        setDrilldown((current) => current ? {
+          ...current,
+          rows: result.rows,
+          totalCount: result.totalCount,
+          loading: false,
+          error: null
+        } : current);
+      } catch (error) {
+        if (cancelled) return;
+        setDrilldown((current) => current ? {
+          ...current,
+          rows: [],
+          totalCount: 0,
+          loading: false,
+          error: error instanceof Error ? error.message : "Không thể tải chi tiết."
+        } : current);
+      }
+    };
+
+    loadDrilldown();
+    return () => {
+      cancelled = true;
+    };
+  }, [drilldown?.type, drilldown?.page, loadOrderLikeDrilldown, loadPendingDrilldown]);
+
+  const drilldownTotalPages = drilldown
+    ? Math.max(1, Math.ceil(drilldown.totalCount / DRILLDOWN_PAGE_SIZE))
+    : 1;
 
   return (
     <div className="grid" style={{ gap: 28 }}>
@@ -159,18 +376,24 @@ export default function DashboardPage() {
             value={fmtNum(stats.users)}
             icon={<IcoUsers />}
             glow="blue"
+            iconButtonLabel="Xem danh sách người dùng"
+            onIconClick={() => openDrilldown("users")}
           />
           <StatCard
             label="Đơn hàng"
             value={fmtNum(stats.orders)}
             icon={<IcoOrders />}
             glow="green"
+            iconButtonLabel="Xem danh sách đơn hàng"
+            onIconClick={() => openDrilldown("orders")}
           />
           <StatCard
             label="Doanh thu"
             value={fmtVND(stats.revenue)}
             icon={<IcoRevenue />}
             glow="gold"
+            iconButtonLabel="Xem chi tiết doanh thu"
+            onIconClick={() => openDrilldown("revenue")}
           />
           <StatCard
             label="Chờ duyệt"
@@ -178,57 +401,9 @@ export default function DashboardPage() {
             icon={<IcoPending />}
             glow={totalPending > 0 ? "red" : "green"}
             sub={totalPending > 0 ? `${pendingDeposits} nạp · ${pendingWithdrawals} rút` : "Không có gì pending"}
+            iconButtonLabel="Xem hàng chờ duyệt"
+            onIconClick={() => openDrilldown("pending")}
           />
-        </div>
-      )}
-
-      {/* ── Health Cards ── */}
-      {health && (
-        <div className="grid stats" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
-          <div className="stat-card" style={{ gap: 8 }}>
-            <div className="stat-header">
-              <p className="stat-label">Direct quá hạn</p>
-              <div className={`stat-icon ${health.queues.pendingDirectOrdersExpired > 0 ? "red" : "green"}`}>
-                <IcoAlert />
-              </div>
-            </div>
-            <div className="stat-value" style={{ fontSize: 22 }}>
-              {health.queues.pendingDirectOrdersExpired}
-            </div>
-            <StatusPill tone={health.queues.pendingDirectOrdersExpired > 0 ? "danger" : "success"}>
-              {health.queues.pendingDirectOrdersExpired > 0 ? "Cần xử lý" : "Ổn định"}
-            </StatusPill>
-          </div>
-
-          <div className="stat-card" style={{ gap: 8 }}>
-            <div className="stat-header">
-              <p className="stat-label">Outbox lỗi</p>
-              <div className={`stat-icon ${health.queues.deliveryOutbox.failed > 0 ? "red" : "green"}`}>
-                <IcoBox />
-              </div>
-            </div>
-            <div className="stat-value" style={{ fontSize: 22 }}>
-              {health.queues.deliveryOutbox.failed}
-            </div>
-            <StatusPill tone={health.queues.deliveryOutbox.failed > 0 ? "danger" : "success"}>
-              {health.queues.deliveryOutbox.failed > 0 ? "Failed delivery" : "Giao hàng OK"}
-            </StatusPill>
-          </div>
-
-          <div className="stat-card" style={{ gap: 8 }}>
-            <div className="stat-header">
-              <p className="stat-label">Low stock</p>
-              <div className={`stat-icon ${health.stock.count > 0 ? "gold" : "green"}`}>
-                <IcoBox />
-              </div>
-            </div>
-            <div className="stat-value" style={{ fontSize: 22 }}>
-              {health.stock.count}
-            </div>
-            <StatusPill tone={health.stock.count > 0 ? "warning" : "success"}>
-              ngưỡng ≤ {health.stock.threshold}
-            </StatusPill>
-          </div>
         </div>
       )}
 
@@ -298,6 +473,129 @@ export default function DashboardPage() {
           </DataTable>
         )}
       </SectionCard>
+
+      {drilldown && (
+        <div className="modal-backdrop" onClick={() => !drilldown.loading && closeDrilldown()}>
+          <div className="modal modal-wide modal-scrollable" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-scroll-region">
+              <div className="topbar" style={{ marginBottom: 12 }}>
+                <div>
+                  <h3 className="section-title" style={{ marginBottom: 6 }}>{drilldown.title}</h3>
+                  <p className="muted">
+                    Tải theo trang khi mở modal, mỗi trang {DRILLDOWN_PAGE_SIZE} dòng.
+                  </p>
+                </div>
+              </div>
+
+              {drilldown.error && (
+                <p className="muted" style={{ color: "var(--danger)", marginBottom: 12 }}>
+                  {drilldown.error}
+                </p>
+              )}
+
+              {drilldown.loading ? (
+                <SkeletonTable rows={6} cols={drilldown.type === "users" ? 6 : 7} />
+              ) : drilldown.rows.length === 0 ? (
+                <EmptyState title="Chưa có dữ liệu" description="Không có dòng nào phù hợp với snapshot hiện tại." />
+              ) : drilldown.type === "users" ? (
+                <DataTable>
+                  <thead>
+                    <tr>
+                      <th>User ID</th>
+                      <th>Username</th>
+                      <th>Tên</th>
+                      <th>Đơn</th>
+                      <th>Tổng mua</th>
+                      <th>Created</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(drilldown.rows as UserSnapshotRow[]).map((user) => (
+                      <tr key={user.user_id}>
+                        <td>{user.user_id}</td>
+                        <td>{user.username || "-"}</td>
+                        <td>{user.display_name || "-"}</td>
+                        <td>{user.order_count.toLocaleString("vi-VN")}</td>
+                        <td>{fmtVND(user.total_paid)}</td>
+                        <td>{formatDateTime(user.created_at)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </DataTable>
+              ) : drilldown.type === "pending" ? (
+                <DataTable>
+                  <thead>
+                    <tr>
+                      <th>Loại</th>
+                      <th>ID</th>
+                      <th>User</th>
+                      <th>Số tiền</th>
+                      <th>Code/Phone</th>
+                      <th>Status</th>
+                      <th>Thời gian</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(drilldown.rows as DashboardPendingRow[]).map((row) => (
+                      <tr key={`${row.type}:${row.id}`}>
+                        <td>{row.type === "deposit" ? "Nạp tiền" : "Rút tiền"}</td>
+                        <td>#{row.id}</td>
+                        <td>{row.user_id}</td>
+                        <td>{fmtVND(row.amount)}</td>
+                        <td>{row.code || "-"}</td>
+                        <td>{row.status}</td>
+                        <td>{formatDateTime(row.created_at)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </DataTable>
+              ) : (
+                <DataTable>
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>User</th>
+                      <th>Sản phẩm</th>
+                      <th>SL</th>
+                      <th>Giá</th>
+                      <th>Username</th>
+                      <th>Thời gian</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(drilldown.rows as DashboardDrilldownOrder[]).map((order) => (
+                      <tr key={order.id}>
+                        <td>#{shortId(order.id)}</td>
+                        <td>{order.display_name || order.user_id}</td>
+                        <td>{order.product_name}</td>
+                        <td>{order.quantity.toLocaleString("vi-VN")}</td>
+                        <td>{fmtVND(order.price)}</td>
+                        <td>{order.username ? `@${order.username}` : "-"}</td>
+                        <td>{formatDateTime(order.created_at)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </DataTable>
+              )}
+            </div>
+            <div className="modal-actions">
+              <PaginationControls
+                page={drilldown.page}
+                totalPages={drilldownTotalPages}
+                totalCount={drilldown.totalCount}
+                pageSize={DRILLDOWN_PAGE_SIZE}
+                onPageChange={setDrilldownPage}
+                onPageSizeChange={() => undefined}
+                disabled={drilldown.loading}
+                showPageSize={false}
+              />
+              <button className="button secondary" type="button" onClick={closeDrilldown} disabled={drilldown.loading}>
+                Đóng
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

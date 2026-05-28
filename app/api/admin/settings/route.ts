@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
 import { getSupabaseAdminClient } from "@/app/api/_shared/supabaseAdmin";
 import { recordAdminAuditEvent } from "@/app/api/_shared/adminAudit";
+import { withAdminApiTiming } from "@/app/api/_shared/serverTiming";
 
 const SETTINGS_KEYS = [
   "bank_name",
@@ -47,6 +48,7 @@ const SECRET_SETTING_KEYS = new Set<string>([
   "binance_pay_merchant_api_secret",
   "payment_notify_bot_token"
 ]);
+const MASKED_SECRET_VALUE = "********";
 
 const SETTINGS_KEY_SET = new Set<string>(SETTINGS_KEYS);
 const TOGGLE_KEYS = new Set<string>([
@@ -74,7 +76,7 @@ const normalizeSettingValue = (key: string, value: unknown) => {
   return typeof value === "string" ? value : String(value ?? "");
 };
 
-export async function GET(request: NextRequest) {
+async function handleGET(request: NextRequest) {
   const adminSession = await requireAdminSession(request);
   if (adminSession.ok === false) {
     return adminSession.response;
@@ -99,8 +101,9 @@ export async function GET(request: NextRequest) {
 
     const value = typeof row.value === "string" ? row.value : String(row.value ?? "");
     if (SECRET_SETTING_KEYS.has(key)) {
-      values[key] = "";
-      secretPresent[key] = value.trim().length > 0;
+      const hasSecret = value.trim().length > 0;
+      values[key] = hasSecret ? MASKED_SECRET_VALUE : "";
+      secretPresent[key] = hasSecret;
     } else {
       values[key] = value;
     }
@@ -115,7 +118,7 @@ export async function GET(request: NextRequest) {
   });
 }
 
-export async function POST(request: NextRequest) {
+async function handlePOST(request: NextRequest) {
   const adminSession = await requireAdminSession(request);
   if (adminSession.ok === false) {
     return adminSession.response;
@@ -134,7 +137,10 @@ export async function POST(request: NextRequest) {
   const payload: Array<{ key: string; value: string }> = [];
   for (const key of SETTINGS_KEYS) {
     const rawValue = settings[key];
-    if (SECRET_SETTING_KEYS.has(key) && (rawValue === undefined || String(rawValue).trim() === "")) {
+    if (
+      SECRET_SETTING_KEYS.has(key) &&
+      (rawValue === undefined || String(rawValue).trim() === "" || String(rawValue).trim() === MASKED_SECRET_VALUE)
+    ) {
       continue;
     }
     payload.push({ key, value: normalizeSettingValue(key, rawValue) });
@@ -159,3 +165,6 @@ export async function POST(request: NextRequest) {
 
   return NextResponse.json({ success: true, data: { updated: payload.length } });
 }
+
+export const GET = withAdminApiTiming("GET /api/admin/settings", handleGET);
+export const POST = withAdminApiTiming("POST /api/admin/settings", handlePOST);

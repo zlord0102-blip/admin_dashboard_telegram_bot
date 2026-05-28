@@ -57,9 +57,13 @@ const SECRET_SETTING_KEYS = new Set([
   "binance_pay_merchant_api_secret",
   "payment_notify_bot_token"
 ]);
+const MASKED_SECRET_VALUE = "********";
 
 const getSecretPlaceholder = (key: string, secretPresent: Record<string, boolean>, fallback: string) =>
   secretPresent[key] ? "Đã lưu - nhập giá trị mới nếu muốn đổi" : fallback;
+
+const secretInputClassName = (value: string | undefined) =>
+  value === MASKED_SECRET_VALUE ? "input secret-input is-masked" : "input secret-input";
 
 export default function SettingsPage() {
   const [values, setValues] = useState<Record<string, string>>({});
@@ -117,7 +121,7 @@ export default function SettingsPage() {
         acc[key] = String(normalized);
         return acc;
       }
-      if (SECRET_SETTING_KEYS.has(key) && !(values[key] || "").trim()) {
+      if (SECRET_SETTING_KEYS.has(key) && (!(values[key] || "").trim() || values[key] === MASKED_SECRET_VALUE)) {
         return acc;
       }
       acc[key] = values[key] || "";
@@ -173,7 +177,7 @@ export default function SettingsPage() {
             onChange={(e) => updateField("account_name", e.target.value)}
           />
           <input
-            className="input"
+            className={secretInputClassName(values.sepay_token)}
             type="password"
             placeholder={getSecretPlaceholder("sepay_token", secretPresent, "SePay token")}
             value={values.sepay_token || ""}
@@ -202,7 +206,7 @@ export default function SettingsPage() {
               <label className="grid" style={{ gap: 6 }}>
                 <span className="muted">Binance API Key</span>
                 <input
-                  className="input"
+                  className={secretInputClassName(values.binance_api_key)}
                   type="password"
                   placeholder={getSecretPlaceholder("binance_api_key", secretPresent, "Binance API Key")}
                   value={values.binance_api_key || ""}
@@ -212,7 +216,7 @@ export default function SettingsPage() {
               <label className="grid" style={{ gap: 6 }}>
                 <span className="muted">Binance API Secret</span>
                 <input
-                  className="input"
+                  className={secretInputClassName(values.binance_api_secret)}
                   type="password"
                   placeholder={getSecretPlaceholder("binance_api_secret", secretPresent, "Binance API Secret")}
                   value={values.binance_api_secret || ""}
@@ -239,7 +243,7 @@ export default function SettingsPage() {
               <label className="grid" style={{ gap: 6 }}>
                 <span className="muted">Binance Pay Merchant API Key</span>
                 <input
-                  className="input"
+                  className={secretInputClassName(values.binance_pay_merchant_api_key)}
                   type="password"
                   placeholder={getSecretPlaceholder("binance_pay_merchant_api_key", secretPresent, "Merchant API Key")}
                   value={values.binance_pay_merchant_api_key || ""}
@@ -249,7 +253,7 @@ export default function SettingsPage() {
               <label className="grid" style={{ gap: 6 }}>
                 <span className="muted">Binance Pay Merchant API Secret</span>
                 <input
-                  className="input"
+                  className={secretInputClassName(values.binance_pay_merchant_api_secret)}
                   type="password"
                   placeholder={getSecretPlaceholder("binance_pay_merchant_api_secret", secretPresent, "Merchant API Secret")}
                   value={values.binance_pay_merchant_api_secret || ""}
@@ -339,7 +343,7 @@ export default function SettingsPage() {
               Khi đơn thanh toán thành công, hệ thống sẽ gửi thông báo sang bot Telegram khác.
             </p>
             <input
-              className="input"
+              className={secretInputClassName(values.payment_notify_bot_token)}
               type="password"
               placeholder={getSecretPlaceholder("payment_notify_bot_token", secretPresent, "Bot_Token nhận thông báo")}
               value={values.payment_notify_bot_token || ""}

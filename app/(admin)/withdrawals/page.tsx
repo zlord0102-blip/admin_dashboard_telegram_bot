@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { supabase } from "@/lib/supabaseClient";
-import { performAdminFinanceAction } from "@/lib/adminFinanceClient";
+import { fetchAdminFinanceQueue, performAdminFinanceAction } from "@/lib/adminFinanceClient";
 import { ConfirmDialog, RowActionMenu } from "@/components/AdminUi";
 
 interface Withdrawal {
@@ -24,16 +23,12 @@ export default function WithdrawalsPage() {
   const [pendingAction, setPendingAction] = useState<PendingWithdrawalAction>(null);
 
   const load = async () => {
-    const { data } = await supabase
-      .from("withdrawals")
-      .select("id, user_id, amount, momo_phone, status, created_at")
-      .eq("status", "pending")
-      .order("created_at", { ascending: false });
-    setWithdrawals((data as Withdrawal[]) || []);
+    const snapshot = await fetchAdminFinanceQueue<Withdrawal>("withdrawal");
+    setWithdrawals(snapshot.rows || []);
   };
 
   useEffect(() => {
-    load();
+    load().catch(() => setWithdrawals([]));
   }, []);
 
   const confirmWithdrawal = async (withdrawal: Withdrawal) => {

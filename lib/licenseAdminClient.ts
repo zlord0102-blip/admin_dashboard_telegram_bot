@@ -15,6 +15,10 @@ type AdminResponse<T> = {
   error?: string;
 };
 
+const LICENSE_GET_CACHE_TTL_MS = 5_000;
+const licenseGetCache = new Map<string, { expiresAt: number; data: unknown }>();
+const licenseGetRequests = new Map<string, Promise<unknown>>();
+
 const getAccessToken = async () => {
   const { data } = await supabase.auth.getSession();
   const token = data.session?.access_token;
@@ -26,22 +30,59 @@ const getAccessToken = async () => {
 
 async function requestAdminApi<T>(path: string, init?: RequestInit): Promise<T> {
   const token = await getAccessToken();
-  const response = await fetch(path, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-      ...(init?.headers || {})
-    },
-    cache: "no-store"
-  });
+  const method = String(init?.method || "GET").toUpperCase();
+  const cacheKey = `${token}:${method}:${path}`;
+  const now = Date.now();
 
-  const payload = (await response.json().catch(() => null)) as AdminResponse<T> | null;
-  if (!response.ok) {
-    throw new Error(payload?.error || "Không thể tải dữ liệu.");
+  if (method === "GET") {
+    const cached = licenseGetCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return cached.data as T;
+    }
+
+    const pending = licenseGetRequests.get(cacheKey);
+    if (pending) {
+      return pending as Promise<T>;
+    }
   }
 
-  return payload?.data as T;
+  const request = (async () => {
+    const response = await fetch(path, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+        ...(init?.headers || {})
+      },
+      cache: "no-store"
+    });
+
+    const payload = (await response.json().catch(() => null)) as AdminResponse<T> | null;
+    if (!response.ok) {
+      throw new Error(payload?.error || "Không thể tải dữ liệu.");
+    }
+
+    const result = payload?.data as T;
+    if (method === "GET") {
+      licenseGetCache.set(cacheKey, {
+        data: result,
+        expiresAt: Date.now() + LICENSE_GET_CACHE_TTL_MS
+      });
+    } else {
+      licenseGetCache.clear();
+    }
+    return result;
+  })();
+
+  if (method === "GET") {
+    licenseGetRequests.set(cacheKey, request as Promise<unknown>);
+  }
+
+  try {
+    return await request;
+  } finally {
+    licenseGetRequests.delete(cacheKey);
+  }
 }
 
 export const fetchLicenseExtensions = () =>

@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { adminApiRequest } from "@/lib/adminOpsClient";
-import { ConfirmDialog, RowActionMenu } from "@/components/AdminUi";
+import { ConfirmDialog, PaginationControls, RowActionMenu } from "@/components/AdminUi";
 
 interface DirectOrderRow {
   id: number;
@@ -50,32 +50,54 @@ export default function DirectOrdersPage() {
   const [sendingId, setSendingId] = useState<number | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingDirectOrderAction>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [totalCount, setTotalCount] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
 
-  const load = async () => {
+  const load = async (pageIndex = page, nextPageSize = pageSize) => {
+    setLoading(true);
+    const from = (pageIndex - 1) * nextPageSize;
+    const to = from + nextPageSize - 1;
     let query = supabase
       .from("direct_orders")
-      .select("id, user_id, product_id, quantity, bonus_quantity, unit_price, amount, code, status, created_at, payment_channel, payment_asset, payment_network, payment_amount_asset, payment_address, payment_address_tag, external_payment_id, external_tx_id, external_paid_at, binance_pay_prepay_id, binance_pay_status, products(name)")
+      .select("id, user_id, product_id, quantity, bonus_quantity, unit_price, amount, code, status, created_at, payment_channel, payment_asset, payment_network, payment_amount_asset, payment_address, payment_address_tag, external_payment_id, external_tx_id, external_paid_at, binance_pay_prepay_id, binance_pay_status, products(name)", { count: "exact" })
       .order("created_at", { ascending: false })
-      .limit(200);
+      .range(from, to);
     if (statusFilter !== "all") {
       query = query.eq("status", statusFilter);
     }
-    const { data, error } = await query;
-    if (error) {
-      const fallback = await supabase
-        .from("direct_orders")
-        .select("id, user_id, product_id, quantity, unit_price, amount, code, status, created_at, products(name)")
-        .order("created_at", { ascending: false })
-        .limit(200);
-      setOrders(((fallback.data as unknown) as DirectOrderRow[]) || []);
-      return;
+    try {
+      const { data, error, count } = await query;
+      if (error) {
+        let fallback = supabase
+          .from("direct_orders")
+          .select("id, user_id, product_id, quantity, unit_price, amount, code, status, created_at, products(name)", { count: "exact" })
+          .order("created_at", { ascending: false })
+          .range(from, to);
+        if (statusFilter !== "all") {
+          fallback = fallback.eq("status", statusFilter);
+        }
+        const fallbackResult = await fallback;
+        setOrders(((fallbackResult.data as unknown) as DirectOrderRow[]) || []);
+        setTotalCount(fallbackResult.count ?? 0);
+        return;
+      }
+      setOrders(((data as unknown) as DirectOrderRow[]) || []);
+      setTotalCount(count ?? 0);
+    } finally {
+      setLoading(false);
     }
-    setOrders(((data as unknown) as DirectOrderRow[]) || []);
   };
 
   useEffect(() => {
-    load();
-  }, [statusFilter]);
+    load(page, pageSize).catch(() => {
+      setOrders([]);
+      setTotalCount(0);
+      setLoading(false);
+    });
+  }, [statusFilter, page, pageSize]);
 
   const filtered = useMemo(() => orders, [orders]);
   const paymentChannelLabel = (channel: string | null | undefined) => {
@@ -177,7 +199,10 @@ export default function DirectOrdersPage() {
           <select
             className="select"
             value={statusFilter}
-            onChange={(event) => setStatusFilter(event.target.value)}
+            onChange={(event) => {
+              setPage(1);
+              setStatusFilter(event.target.value);
+            }}
           >
             <option value="pending">Chờ xử lý</option>
             <option value="confirmed">Đã duyệt</option>
@@ -257,11 +282,23 @@ export default function DirectOrdersPage() {
             ))}
             {!filtered.length && (
               <tr>
-                <td colSpan={12} className="muted">Chưa có đơn.</td>
+                <td colSpan={12} className="muted">{loading ? "Đang tải direct orders..." : "Chưa có đơn."}</td>
               </tr>
             )}
           </tbody>
         </table>
+        <PaginationControls
+          page={page}
+          totalPages={totalPages}
+          totalCount={totalCount}
+          pageSize={pageSize}
+          disabled={loading}
+          onPageChange={setPage}
+          onPageSizeChange={(nextPageSize) => {
+            setPageSize(nextPageSize);
+            setPage(1);
+          }}
+        />
       </div>
 
       <ConfirmDialog

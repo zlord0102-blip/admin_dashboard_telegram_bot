@@ -2,8 +2,49 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
 import { getSupabaseAdminClient } from "@/app/api/_shared/supabaseAdmin";
 import { recordAdminAuditEvent } from "@/app/api/_shared/adminAudit";
+import { getOrSetServerCache, invalidateServerCacheByPrefix } from "@/app/api/_shared/serverCache";
+import { withAdminApiTiming } from "@/app/api/_shared/serverTiming";
 
 const DEFAULT_SALE_CUSTOM_EMOJI_ID = "6055192572056309981";
+const SALES_ADMIN_CACHE_PREFIX = "admin-sales:";
+const SALES_ADMIN_CACHE_TTL_MS = 10_000;
+
+type AdminSupabaseClient = ReturnType<typeof getSupabaseAdminClient>;
+
+type SalesSnapshot = {
+  campaigns: unknown[];
+  items: unknown[];
+  products: unknown[];
+};
+
+const emptySalesSnapshot = (): SalesSnapshot => ({
+  campaigns: [],
+  items: [],
+  products: []
+});
+
+const normalizeSalesSnapshot = (value: unknown): SalesSnapshot => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return emptySalesSnapshot();
+  }
+
+  const snapshot = value as Partial<SalesSnapshot>;
+  return {
+    campaigns: Array.isArray(snapshot.campaigns) ? snapshot.campaigns : [],
+    items: Array.isArray(snapshot.items) ? snapshot.items : [],
+    products: Array.isArray(snapshot.products) ? snapshot.products : []
+  };
+};
+
+const isMissingRpcError = (error: { code?: string; message?: string } | null | undefined) => {
+  const message = String(error?.message || "").toLowerCase();
+  return (
+    error?.code === "PGRST202" ||
+    message.includes("could not find the function") ||
+    message.includes("schema cache") ||
+    message.includes("function public.admin_bot_sales_snapshot_v1")
+  );
+};
 
 const toPositiveInt = (value: unknown, fallback: number | null = null) => {
   const parsed = Number.parseInt(String(value ?? ""), 10);
@@ -35,7 +76,85 @@ const safeDate = (value: unknown) => {
   return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : "";
 };
 
-async function fetchProducts(supabase: ReturnType<typeof getSupabaseAdminClient>) {
+const buildCampaignPayload = (body: any, { allowPaused = false } = {}) => {
+  const name = cleanText(body?.name);
+  const startsAt = safeDate(body?.startsAt);
+  const endsAt = safeDate(body?.endsAt);
+  if (!name) return { error: "Tên campaign không được trống." };
+  if (!startsAt || !endsAt || new Date(endsAt) <= new Date(startsAt)) {
+    return { error: "Thời gian Sale không hợp lệ." };
+  }
+  const allowedStatuses = allowPaused
+    ? ["draft", "scheduled", "active", "paused", "ended", "cancelled"]
+    : ["draft", "scheduled", "active"];
+  const status = allowedStatuses.includes(String(body?.status)) ? String(body.status) : "scheduled";
+  return {
+    payload: {
+      name,
+      status,
+      starts_at: startsAt,
+      ends_at: endsAt,
+      timezone: cleanText(body?.timezone, "Asia/Ho_Chi_Minh") || "Asia/Ho_Chi_Minh",
+      default_telegram_icon: cleanText(body?.telegramIcon, "SALE") || "SALE",
+      default_telegram_icon_custom_emoji_id:
+        cleanText(body?.telegramIconCustomEmojiId, DEFAULT_SALE_CUSTOM_EMOJI_ID) || DEFAULT_SALE_CUSTOM_EMOJI_ID,
+      total_quantity_limit: toOptionalPositiveInt(body?.totalQuantityLimit),
+      per_user_limit: toOptionalPositiveInt(body?.perUserLimit),
+      notify_on_start: Boolean(body?.notifyOnStart),
+      notify_ending_soon: Boolean(body?.notifyEndingSoon),
+      notes: cleanText(body?.notes)
+    }
+  };
+};
+
+const buildSaleItemUpdatePayload = async (
+  supabase: ReturnType<typeof getSupabaseAdminClient>,
+  body: any,
+  saleItemId: number
+) => {
+  const salePriceVnd = toNonNegativeInt(body?.salePriceVnd, -1);
+  const salePriceUsdt = body?.salePriceUsdt === "" || body?.salePriceUsdt == null ? null : Number(body.salePriceUsdt);
+  if (salePriceVnd < 0) return { error: "Giá Sale không hợp lệ." };
+  if (salePriceUsdt !== null && !Number.isFinite(salePriceUsdt)) {
+    return { error: "Giá Sale USDT không hợp lệ." };
+  }
+
+  const { data: saleItem, error: saleItemError } = await supabase
+    .from("sale_items")
+    .select("id,product_id,products(id,price,price_usdt)")
+    .eq("id", saleItemId)
+    .maybeSingle();
+  if (saleItemError) throw saleItemError;
+  if (!saleItem) return { error: "Món Sale không tồn tại." };
+
+  const product = Array.isArray((saleItem as any).products)
+    ? (saleItem as any).products[0]
+    : (saleItem as any).products;
+  const originalPrice = Number(product?.price ?? 0);
+  const discountPercent =
+    originalPrice > 0 ? Math.max(0, Math.round((1 - salePriceVnd / originalPrice) * 10000) / 100) : null;
+
+  return {
+    payload: {
+      sale_name: cleanText(body?.saleName),
+      sale_description: cleanText(body?.saleDescription),
+      sale_price_vnd: salePriceVnd,
+      sale_price_usdt: salePriceUsdt,
+      discount_percent: discountPercent,
+      promo_buy_quantity: toNonNegativeInt(body?.promoBuyQuantity),
+      promo_bonus_quantity: toNonNegativeInt(body?.promoBonusQuantity),
+      quantity_limit: toOptionalPositiveInt(body?.quantityLimit),
+      per_user_limit: toOptionalPositiveInt(body?.perUserLimit),
+      telegram_icon: cleanText(body?.telegramIcon, "SALE") || "SALE",
+      telegram_icon_custom_emoji_id:
+        cleanText(body?.telegramIconCustomEmojiId, DEFAULT_SALE_CUSTOM_EMOJI_ID) || DEFAULT_SALE_CUSTOM_EMOJI_ID,
+      sort_position: toOptionalPositiveInt(body?.sortPosition)
+    },
+    productId: Number((saleItem as any).product_id)
+  };
+};
+
+async function fetchProducts(supabase: AdminSupabaseClient) {
   const rpc = await supabase.rpc("get_products_with_stock");
   if (!rpc.error && Array.isArray(rpc.data)) {
     return rpc.data;
@@ -49,7 +168,7 @@ async function fetchProducts(supabase: ReturnType<typeof getSupabaseAdminClient>
   return data ?? [];
 }
 
-async function getCampaign(supabase: ReturnType<typeof getSupabaseAdminClient>, campaignId: number) {
+async function getCampaign(supabase: AdminSupabaseClient, campaignId: number) {
   const { data, error } = await supabase
     .from("sale_campaigns")
     .select("*")
@@ -60,7 +179,7 @@ async function getCampaign(supabase: ReturnType<typeof getSupabaseAdminClient>, 
 }
 
 async function assertNoProductTimeConflict(
-  supabase: ReturnType<typeof getSupabaseAdminClient>,
+  supabase: AdminSupabaseClient,
   productId: number,
   startsAt: string,
   endsAt: string,
@@ -91,7 +210,7 @@ async function assertNoProductTimeConflict(
 }
 
 async function reserveExistingStock(
-  supabase: ReturnType<typeof getSupabaseAdminClient>,
+  supabase: AdminSupabaseClient,
   productId: number,
   saleItemId: number,
   quantity: number
@@ -134,57 +253,106 @@ async function reserveExistingStock(
   return availableIds.length;
 }
 
-export async function GET(request: NextRequest) {
+async function loadSalesSnapshot(supabase: AdminSupabaseClient): Promise<SalesSnapshot> {
+  const [campaignsResult, itemsResult, products] = await Promise.all([
+    supabase.from("sale_campaigns").select("*").order("starts_at", { ascending: false }),
+    supabase
+      .from("sale_items")
+      .select("*,products(id,name,price,price_usdt,telegram_icon,telegram_icon_custom_emoji_id)")
+      .order("created_at", { ascending: false }),
+    fetchProducts(supabase)
+  ]);
+
+  if (campaignsResult.error) throw campaignsResult.error;
+  if (itemsResult.error) throw itemsResult.error;
+
+  const itemIds = Array.from(
+    new Set(
+      (itemsResult.data ?? [])
+        .map((item) => Number(item.id))
+        .filter((itemId) => Number.isFinite(itemId) && itemId > 0)
+    )
+  );
+
+  let reservationRows: Array<{
+    sale_item_id: number | string | null;
+    status: string | null;
+    held_until: string | null;
+    released_at: string | null;
+  }> = [];
+
+  if (itemIds.length) {
+    const { data: reservationData, error } = await supabase
+      .from("sale_stock_reservations")
+      .select("sale_item_id,status,held_until,released_at")
+      .in("sale_item_id", itemIds);
+
+    if (error) throw error;
+    reservationRows = (reservationData ?? []) as typeof reservationRows;
+  }
+
+  const reservationStats = new Map<number, { available: number; held: number; sold: number; released: number }>();
+  const now = Date.now();
+  for (const row of reservationRows) {
+    const saleItemId = Number(row.sale_item_id);
+    if (!Number.isFinite(saleItemId)) continue;
+    const stats = reservationStats.get(saleItemId) ?? { available: 0, held: 0, sold: 0, released: 0 };
+    const status = String(row.status || "");
+    if (status === "held" && row.held_until && new Date(row.held_until).getTime() <= now) {
+      stats.available += 1;
+    } else if (status === "available") {
+      stats.available += 1;
+    } else if (status === "held") {
+      stats.held += 1;
+    } else if (status === "sold") {
+      stats.sold += 1;
+    } else {
+      stats.released += 1;
+    }
+    reservationStats.set(saleItemId, stats);
+  }
+
+  const items = (itemsResult.data ?? []).map((item) => ({
+    ...item,
+    reservation_stats: reservationStats.get(Number(item.id)) ?? { available: 0, held: 0, sold: 0, released: 0 }
+  }));
+
+  return {
+    campaigns: campaignsResult.data ?? [],
+    items,
+    products
+  };
+}
+
+async function getSalesSnapshot(supabase: AdminSupabaseClient): Promise<SalesSnapshot> {
+  const rpcResult = await supabase.rpc("admin_bot_sales_snapshot_v1");
+  if (!rpcResult.error) {
+    return normalizeSalesSnapshot(rpcResult.data);
+  }
+
+  if (!isMissingRpcError(rpcResult.error)) {
+    throw new Error(rpcResult.error.message || "Không thể tải Sale.");
+  }
+
+  return loadSalesSnapshot(supabase);
+}
+
+const invalidateSalesAdminCache = () => invalidateServerCacheByPrefix(SALES_ADMIN_CACHE_PREFIX);
+
+async function handleGET(request: NextRequest) {
   const adminSession = await requireAdminSession(request);
   if (adminSession.ok === false) return adminSession.response;
 
   const supabase = getSupabaseAdminClient();
   try {
-    const [campaignsResult, itemsResult, reservationsResult, products] = await Promise.all([
-      supabase.from("sale_campaigns").select("*").order("starts_at", { ascending: false }),
-      supabase.from("sale_items").select("*,products(id,name,price,price_usdt,telegram_icon,telegram_icon_custom_emoji_id)").order("created_at", { ascending: false }),
-      supabase.from("sale_stock_reservations").select("sale_item_id,status,held_until,released_at").limit(20000),
-      fetchProducts(supabase)
-    ]);
-
-    if (campaignsResult.error) throw campaignsResult.error;
-    if (itemsResult.error) throw itemsResult.error;
-    if (reservationsResult.error) throw reservationsResult.error;
-
-    const reservationStats = new Map<number, { available: number; held: number; sold: number; released: number }>();
-    const now = Date.now();
-    for (const row of reservationsResult.data ?? []) {
-      const saleItemId = Number(row.sale_item_id);
-      if (!Number.isFinite(saleItemId)) continue;
-      const stats = reservationStats.get(saleItemId) ?? { available: 0, held: 0, sold: 0, released: 0 };
-      const status = String(row.status || "");
-      if (status === "held" && row.held_until && new Date(row.held_until).getTime() <= now) {
-        stats.available += 1;
-      } else if (status === "available") {
-        stats.available += 1;
-      } else if (status === "held") {
-        stats.held += 1;
-      } else if (status === "sold") {
-        stats.sold += 1;
-      } else {
-        stats.released += 1;
-      }
-      reservationStats.set(saleItemId, stats);
-    }
-
-    const items = (itemsResult.data ?? []).map((item) => ({
-      ...item,
-      reservation_stats: reservationStats.get(Number(item.id)) ?? { available: 0, held: 0, sold: 0, released: 0 }
-    }));
-
-    return NextResponse.json({
-      success: true,
-      data: {
-        campaigns: campaignsResult.data ?? [],
-        items,
-        products
-      }
-    });
+    const { value: data, hit } = await getOrSetServerCache(
+      `${SALES_ADMIN_CACHE_PREFIX}snapshot:v2`,
+      SALES_ADMIN_CACHE_TTL_MS,
+      () => getSalesSnapshot(supabase)
+    );
+    const response = NextResponse.json({ success: true, data });
+    response.headers.set("X-Admin-Api-Cache", hit ? "hit" : "miss");
+    return response;
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Không thể tải Sale." },
@@ -193,7 +361,7 @@ export async function GET(request: NextRequest) {
   }
 }
 
-export async function POST(request: NextRequest) {
+async function handlePOST(request: NextRequest) {
   const adminSession = await requireAdminSession(request);
   if (adminSession.ok === false) return adminSession.response;
 
@@ -203,28 +371,9 @@ export async function POST(request: NextRequest) {
 
   try {
     if (action === "create_campaign") {
-      const name = cleanText(body?.name);
-      const startsAt = safeDate(body?.startsAt);
-      const endsAt = safeDate(body?.endsAt);
-      if (!name) return NextResponse.json({ error: "Tên campaign không được trống." }, { status: 400 });
-      if (!startsAt || !endsAt || new Date(endsAt) <= new Date(startsAt)) {
-        return NextResponse.json({ error: "Thời gian Sale không hợp lệ." }, { status: 400 });
-      }
-      const status = ["draft", "scheduled", "active"].includes(String(body?.status)) ? String(body.status) : "scheduled";
-      const payload = {
-        name,
-        status,
-        starts_at: startsAt,
-        ends_at: endsAt,
-        timezone: cleanText(body?.timezone, "Asia/Ho_Chi_Minh") || "Asia/Ho_Chi_Minh",
-        default_telegram_icon: cleanText(body?.telegramIcon, "SALE") || "SALE",
-        default_telegram_icon_custom_emoji_id: cleanText(body?.telegramIconCustomEmojiId, DEFAULT_SALE_CUSTOM_EMOJI_ID) || DEFAULT_SALE_CUSTOM_EMOJI_ID,
-        total_quantity_limit: toOptionalPositiveInt(body?.totalQuantityLimit),
-        per_user_limit: toOptionalPositiveInt(body?.perUserLimit),
-        notify_on_start: Boolean(body?.notifyOnStart),
-        notify_ending_soon: Boolean(body?.notifyEndingSoon),
-        notes: cleanText(body?.notes)
-      };
+      const parsed = buildCampaignPayload(body);
+      if (parsed.error) return NextResponse.json({ error: parsed.error }, { status: 400 });
+      const payload = parsed.payload!;
       const { data, error } = await supabase.from("sale_campaigns").insert(payload).select("*").single();
       if (error) throw error;
       await recordAdminAuditEvent(supabase, {
@@ -233,8 +382,46 @@ export async function POST(request: NextRequest) {
         action: "sale_campaign.create",
         entityType: "sale_campaign",
         entityId: data.id,
-        metadata: { status }
+        metadata: { status: payload.status }
       });
+      invalidateSalesAdminCache();
+      return NextResponse.json({ success: true, data });
+    }
+
+    if (action === "update_campaign") {
+      const campaignId = toPositiveInt(body?.campaignId);
+      if (!campaignId) return NextResponse.json({ error: "campaignId không hợp lệ." }, { status: 400 });
+      const parsed = buildCampaignPayload(body, { allowPaused: true });
+      if (parsed.error) return NextResponse.json({ error: parsed.error }, { status: 400 });
+      const payload = parsed.payload!;
+
+      const { data: itemRows, error: itemError } = await supabase
+        .from("sale_items")
+        .select("product_id")
+        .eq("campaign_id", campaignId)
+        .eq("is_enabled", true);
+      if (itemError) throw itemError;
+      const productIds = Array.from(new Set((itemRows ?? []).map((item) => Number(item.product_id)).filter(Boolean)));
+      for (const productId of productIds) {
+        await assertNoProductTimeConflict(supabase, productId, payload.starts_at, payload.ends_at, campaignId);
+      }
+
+      const { data, error } = await supabase
+        .from("sale_campaigns")
+        .update(payload)
+        .eq("id", campaignId)
+        .select("*")
+        .single();
+      if (error) throw error;
+      await recordAdminAuditEvent(supabase, {
+        adminUserId: adminSession.userId,
+        adminEmail: adminSession.email,
+        action: "sale_campaign.update",
+        entityType: "sale_campaign",
+        entityId: campaignId,
+        metadata: { status: payload.status }
+      });
+      invalidateSalesAdminCache();
       return NextResponse.json({ success: true, data });
     }
 
@@ -255,7 +442,40 @@ export async function POST(request: NextRequest) {
         entityId: campaignId,
         metadata: { status }
       });
+      invalidateSalesAdminCache();
       return NextResponse.json({ success: true, data: { campaignId, status } });
+    }
+
+    if (action === "delete_campaign") {
+      const campaignId = toPositiveInt(body?.campaignId);
+      if (!campaignId) return NextResponse.json({ error: "campaignId không hợp lệ." }, { status: 400 });
+
+      const campaign = await getCampaign(supabase, campaignId);
+      if (!campaign) return NextResponse.json({ error: "Campaign không tồn tại." }, { status: 404 });
+
+      const { data: itemRows, error: itemError } = await supabase
+        .from("sale_items")
+        .select("id")
+        .eq("campaign_id", campaignId);
+      if (itemError) throw itemError;
+
+      const { error } = await supabase.from("sale_campaigns").delete().eq("id", campaignId);
+      if (error) throw error;
+
+      await recordAdminAuditEvent(supabase, {
+        adminUserId: adminSession.userId,
+        adminEmail: adminSession.email,
+        action: "sale_campaign.delete",
+        entityType: "sale_campaign",
+        entityId: campaignId,
+        metadata: {
+          name: campaign.name,
+          status: campaign.status,
+          itemCount: itemRows?.length ?? 0
+        }
+      });
+      invalidateSalesAdminCache();
+      return NextResponse.json({ success: true, data: { campaignId } });
     }
 
     if (action === "add_item_existing_stock" || action === "add_item_new_stock") {
@@ -340,6 +560,7 @@ export async function POST(request: NextRequest) {
           entityId: saleItem.id,
           metadata: { campaignId, productId, reserved }
         });
+        invalidateSalesAdminCache();
         return NextResponse.json({ success: true, data: { saleItem, reserved } });
       } catch (error) {
         await supabase.from("sale_items").delete().eq("id", saleItem.id);
@@ -360,7 +581,78 @@ export async function POST(request: NextRequest) {
         entityType: "sale_item",
         entityId: saleItemId
       });
+      invalidateSalesAdminCache();
       return NextResponse.json({ success: true, data: { saleItemId, enabled } });
+    }
+
+    if (action === "update_item") {
+      const saleItemId = toPositiveInt(body?.saleItemId);
+      if (!saleItemId) return NextResponse.json({ error: "saleItemId không hợp lệ." }, { status: 400 });
+      const parsed = await buildSaleItemUpdatePayload(supabase, body, saleItemId);
+      if (parsed.error) return NextResponse.json({ error: parsed.error }, { status: 400 });
+
+      const { data, error } = await supabase
+        .from("sale_items")
+        .update(parsed.payload!)
+        .eq("id", saleItemId)
+        .select("*")
+        .single();
+      if (error) throw error;
+      await recordAdminAuditEvent(supabase, {
+        adminUserId: adminSession.userId,
+        adminEmail: adminSession.email,
+        action: "sale_item.update",
+        entityType: "sale_item",
+        entityId: saleItemId,
+        metadata: { productId: parsed.productId }
+      });
+      invalidateSalesAdminCache();
+      return NextResponse.json({ success: true, data });
+    }
+
+    if (action === "delete_item") {
+      const saleItemId = toPositiveInt(body?.saleItemId);
+      if (!saleItemId) return NextResponse.json({ error: "saleItemId không hợp lệ." }, { status: 400 });
+
+      const { data: item, error: itemError } = await supabase
+        .from("sale_items")
+        .select("id,campaign_id,product_id,sale_name,is_enabled")
+        .eq("id", saleItemId)
+        .maybeSingle();
+      if (itemError) throw itemError;
+      if (!item) return NextResponse.json({ error: "Món Sale không tồn tại." }, { status: 404 });
+
+      const { data: reservationRows, error: reservationError } = await supabase
+        .from("sale_stock_reservations")
+        .select("status")
+        .eq("sale_item_id", saleItemId);
+      if (reservationError) throw reservationError;
+
+      const reservationStats = (reservationRows ?? []).reduce<Record<string, number>>((acc, row) => {
+        const status = String(row.status || "unknown");
+        acc[status] = (acc[status] || 0) + 1;
+        return acc;
+      }, {});
+
+      const { error } = await supabase.from("sale_items").delete().eq("id", saleItemId);
+      if (error) throw error;
+
+      await recordAdminAuditEvent(supabase, {
+        adminUserId: adminSession.userId,
+        adminEmail: adminSession.email,
+        action: "sale_item.delete",
+        entityType: "sale_item",
+        entityId: saleItemId,
+        metadata: {
+          campaignId: item.campaign_id,
+          productId: item.product_id,
+          saleName: item.sale_name,
+          isEnabled: item.is_enabled,
+          reservationStats
+        }
+      });
+      invalidateSalesAdminCache();
+      return NextResponse.json({ success: true, data: { saleItemId } });
     }
 
     return NextResponse.json({ error: "Action không được hỗ trợ." }, { status: 400 });
@@ -371,3 +663,6 @@ export async function POST(request: NextRequest) {
     );
   }
 }
+
+export const GET = withAdminApiTiming("GET /api/admin/sales", handleGET);
+export const POST = withAdminApiTiming("POST /api/admin/sales", handlePOST);

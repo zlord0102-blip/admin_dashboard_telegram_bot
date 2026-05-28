@@ -12,6 +12,11 @@ import {
   normalizeOptionalText
 } from "@/app/api/_shared/license";
 import type { LicenseKeyAdminStatus, LicenseKeyDeviceLimitMode } from "@/lib/licenseTypes";
+import { getOrSetServerCache, invalidateServerCacheByPrefix } from "@/app/api/_shared/serverCache";
+import { withAdminApiTiming } from "@/app/api/_shared/serverTiming";
+
+const LICENSE_ADMIN_CACHE_PREFIX = "admin-license:";
+const LICENSE_ADMIN_CACHE_TTL_MS = 15_000;
 
 const toPositiveInt = (value: unknown) => {
   const parsed = Number(value);
@@ -29,6 +34,8 @@ const isDuplicateError = (message: string) => {
   const lowered = message.toLowerCase();
   return lowered.includes("duplicate key") || lowered.includes("already exists");
 };
+
+const invalidateLicenseAdminCache = () => invalidateServerCacheByPrefix(LICENSE_ADMIN_CACHE_PREFIX);
 
 const collapseToSingleDeviceIfNeeded = async (supabase: SupabaseClient, licenseKeyId: number) => {
   const { data: activationRows, error: activationError } = await supabase
@@ -67,7 +74,7 @@ const collapseToSingleDeviceIfNeeded = async (supabase: SupabaseClient, licenseK
   return idsToDeactivate.length;
 };
 
-export async function GET(request: NextRequest) {
+async function handleGET(request: NextRequest) {
   const adminSession = await requireAdminSession(request);
   if (adminSession.ok === false) {
     return adminSession.response;
@@ -79,11 +86,16 @@ export async function GET(request: NextRequest) {
     rawStatus === "active" || rawStatus === "expired" || rawStatus === "revoked" ? rawStatus : "all";
 
   try {
-    const data = await listLicenseKeys(adminSession.supabase, {
-      extensionId,
-      status
-    });
-    return NextResponse.json({ success: true, data });
+    const cacheKey = `${LICENSE_ADMIN_CACHE_PREFIX}keys:v1:${extensionId || "all"}:${status}`;
+    const { value: data, hit } = await getOrSetServerCache(cacheKey, LICENSE_ADMIN_CACHE_TTL_MS, () =>
+      listLicenseKeys(adminSession.supabase, {
+        extensionId,
+        status
+      })
+    );
+    const response = NextResponse.json({ success: true, data });
+    response.headers.set("X-Admin-Api-Cache", hit ? "hit" : "miss");
+    return response;
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Không thể tải danh sách license key." },
@@ -92,7 +104,7 @@ export async function GET(request: NextRequest) {
   }
 }
 
-export async function POST(request: NextRequest) {
+async function handlePOST(request: NextRequest) {
   const adminSession = await requireAdminSession(request);
   if (adminSession.ok === false) {
     return adminSession.response;
@@ -160,6 +172,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    invalidateLicenseAdminCache();
     return NextResponse.json({ success: true, data: { ok: true, id: licenseKeyId, prunedActivationCount } });
   }
 
@@ -222,6 +235,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Không thể tạo license key. Hãy thử lại." }, { status: 500 });
   }
 
+  invalidateLicenseAdminCache();
   return NextResponse.json({
     success: true,
     data: {
@@ -232,3 +246,6 @@ export async function POST(request: NextRequest) {
     }
   });
 }
+
+export const GET = withAdminApiTiming("GET /api/licenses/keys", handleGET);
+export const POST = withAdminApiTiming("POST /api/licenses/keys", handlePOST);

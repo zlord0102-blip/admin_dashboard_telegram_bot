@@ -100,6 +100,40 @@ export type TelegramSendFailure = {
 
 type TelegramSendResult = TelegramSendSuccess | TelegramSendFailure;
 
+type TelegramCustomEmojiEntity = {
+  type: "custom_emoji";
+  offset: number;
+  length: number;
+  custom_emoji_id: string;
+};
+
+const CUSTOM_EMOJI_PLACEHOLDER = "✨";
+const INLINE_CUSTOM_EMOJI_RE = /\{(?:emoji|custom_emoji):([0-9]{5,64})\}/g;
+
+export const renderTelegramCustomEmojiText = (text: string) => {
+  const entities: TelegramCustomEmojiEntity[] = [];
+  let rendered = "";
+  let cursor = 0;
+
+  for (const match of text.matchAll(INLINE_CUSTOM_EMOJI_RE)) {
+    const token = match[0];
+    const customEmojiId = match[1];
+    const index = match.index ?? 0;
+    rendered += text.slice(cursor, index);
+    entities.push({
+      type: "custom_emoji",
+      offset: rendered.length,
+      length: CUSTOM_EMOJI_PLACEHOLDER.length,
+      custom_emoji_id: customEmojiId
+    });
+    rendered += CUSTOM_EMOJI_PLACEHOLDER;
+    cursor = index + token.length;
+  }
+
+  rendered += text.slice(cursor);
+  return { text: rendered, entities };
+};
+
 const parseStoredChatIds = (rawValue: string | null | undefined) => {
   if (!rawValue) return [];
   try {
@@ -531,12 +565,14 @@ export async function sendTelegramTextMessage(
     };
   }
 
+  const renderedMessage = renderTelegramCustomEmojiText(text);
   const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       chat_id: chatId,
-      text
+      text: renderedMessage.text,
+      ...(renderedMessage.entities.length ? { entities: renderedMessage.entities } : {})
     })
   });
 
@@ -572,7 +608,7 @@ export async function sendTelegramTextMessage(
     ok: true,
     message_id: typeof result.message_id === "number" ? result.message_id : null,
     date: typeof result.date === "number" ? result.date : null,
-    text: typeof result.text === "string" ? result.text : text
+    text: typeof result.text === "string" ? result.text : renderedMessage.text
   };
 }
 

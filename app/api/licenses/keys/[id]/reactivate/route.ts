@@ -1,12 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
+import { invalidateServerCacheByPrefix } from "@/app/api/_shared/serverCache";
+import { withAdminApiTiming } from "@/app/api/_shared/serverTiming";
+
+const LICENSE_ADMIN_CACHE_PREFIX = "admin-license:";
 
 const parseRouteId = (value: string) => {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 };
 
-export async function POST(
+async function handlePOST(
   request: NextRequest,
   context: { params: { id: string } }
 ) {
@@ -35,5 +39,8 @@ export async function POST(
     return NextResponse.json({ error: "Không tìm thấy license key." }, { status: 404 });
   }
 
+  invalidateServerCacheByPrefix(LICENSE_ADMIN_CACHE_PREFIX);
   return NextResponse.json({ success: true, data: { ok: true } });
 }
+
+export const POST = withAdminApiTiming("POST /api/licenses/keys/[id]/reactivate", handlePOST);

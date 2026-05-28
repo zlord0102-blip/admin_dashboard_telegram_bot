@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { SkeletonTable } from "@/components/AdminUi";
 import {
   fetchReportsSnapshot,
   type RevenueStats,
@@ -177,6 +178,7 @@ function MonthOnlyPicker({ label, value, onChange }: MonthOnlyPickerProps) {
 export default function ReportsPage() {
   const initialMonth = getMonthInputValue(new Date());
   const [loading, setLoading] = useState(true);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedPeriod, setSelectedPeriod] = useState<ReportsPeriod>("month");
   const [resolvedPeriod, setResolvedPeriod] = useState<ReportsPeriod>("month");
@@ -244,6 +246,7 @@ export default function ReportsPage() {
       } catch (loadError) {
         setError(loadError instanceof Error ? loadError.message : "Không thể tải báo cáo.");
       } finally {
+        setHasLoadedOnce(true);
         setLoading(false);
       }
     };
@@ -276,6 +279,7 @@ export default function ReportsPage() {
         revenueDeltaPercent
       )})`
     : "Không áp dụng so sánh kỳ trước.";
+  const initialLoading = loading && !hasLoadedOnce;
 
   const downloadCsv = () => {
     const escapeCsv = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
@@ -314,7 +318,7 @@ export default function ReportsPage() {
           <h1 className="page-title">Reports</h1>
           <p className="muted">Báo cáo vận hành và hiệu suất bán hàng.</p>
         </div>
-        <button className="button secondary" type="button" onClick={downloadCsv}>
+        <button className="button secondary" type="button" onClick={downloadCsv} disabled={initialLoading}>
           Export CSV
         </button>
       </div>
@@ -387,54 +391,90 @@ export default function ReportsPage() {
       <div className="grid stats">
         <div className="card">
           <p className="muted">Doanh thu {periodLabel.toLowerCase()}</p>
-          <h2>{formatCurrency(revenue.current)}</h2>
-          <p className="muted" style={{ marginTop: 4 }}>
-            {comparisonSummary}
-          </p>
+          {initialLoading ? (
+            <SkeletonTable rows={2} cols={1} />
+          ) : (
+            <>
+              <h2>{formatCurrency(revenue.current)}</h2>
+              <p className="muted" style={{ marginTop: 4 }}>
+                {comparisonSummary}
+              </p>
+            </>
+          )}
         </div>
         <div className="card">
           <p className="muted">Số đơn {periodLabel.toLowerCase()}</p>
-          <h2>{orderOps.orderCount.toLocaleString("vi-VN")}</h2>
-          <p className="muted" style={{ marginTop: 4 }}>
-            {hasComparison
-              ? `Doanh thu ${comparisonLabel.toLowerCase()}: ${formatCurrency(revenue.previous)}`
-              : "Thống kê lũy kế toàn bộ đơn hàng đã hoàn tất."}
-          </p>
+          {initialLoading ? (
+            <SkeletonTable rows={2} cols={1} />
+          ) : (
+            <>
+              <h2>{orderOps.orderCount.toLocaleString("vi-VN")}</h2>
+              <p className="muted" style={{ marginTop: 4 }}>
+                {hasComparison
+                  ? `Doanh thu ${comparisonLabel.toLowerCase()}: ${formatCurrency(revenue.previous)}`
+                  : "Thống kê lũy kế toàn bộ đơn hàng đã hoàn tất."}
+              </p>
+            </>
+          )}
         </div>
         <div className="card">
           <p className="muted">AOV {periodLabel.toLowerCase()}</p>
-          <h2>{formatCurrency(orderOps.averageOrderValue)}</h2>
-          <p className="muted" style={{ marginTop: 4 }}>
-            SL trung bình / đơn: {orderOps.averageQuantity.toFixed(2)}
-          </p>
+          {initialLoading ? (
+            <SkeletonTable rows={2} cols={1} />
+          ) : (
+            <>
+              <h2>{formatCurrency(orderOps.averageOrderValue)}</h2>
+              <p className="muted" style={{ marginTop: 4 }}>
+                SL trung bình / đơn: {orderOps.averageQuantity.toFixed(2)}
+              </p>
+            </>
+          )}
         </div>
       </div>
 
       <div className="grid stats">
         <div className="card">
           <p className="muted">Direct order đã duyệt</p>
-          <h2>{directOrderStats.confirmed.toLocaleString("vi-VN")}</h2>
-          <p className="muted" style={{ marginTop: 4 }}>
-            Tỉ lệ duyệt: {directOrderStats.confirmedRate.toFixed(1)}%
-          </p>
+          {initialLoading ? (
+            <SkeletonTable rows={2} cols={1} />
+          ) : (
+            <>
+              <h2>{directOrderStats.confirmed.toLocaleString("vi-VN")}</h2>
+              <p className="muted" style={{ marginTop: 4 }}>
+                Tỉ lệ duyệt: {directOrderStats.confirmedRate.toFixed(1)}%
+              </p>
+            </>
+          )}
         </div>
         <div className="card">
           <p className="muted">Direct order thất bại + hủy</p>
-          <h2>{(directOrderStats.failed + directOrderStats.cancelled).toLocaleString("vi-VN")}</h2>
-          <p className="muted" style={{ marginTop: 4 }}>
-            Tỉ lệ thất bại: {directOrderStats.failedRate.toFixed(1)}%
-          </p>
+          {initialLoading ? (
+            <SkeletonTable rows={2} cols={1} />
+          ) : (
+            <>
+              <h2>{(directOrderStats.failed + directOrderStats.cancelled).toLocaleString("vi-VN")}</h2>
+              <p className="muted" style={{ marginTop: 4 }}>
+                Tỉ lệ thất bại: {directOrderStats.failedRate.toFixed(1)}%
+              </p>
+            </>
+          )}
         </div>
         <div className="card">
           <p className="muted">Direct order đang chờ</p>
-          <h2>{directOrderStats.pending.toLocaleString("vi-VN")}</h2>
-          <p className="muted" style={{ marginTop: 4 }}>
-            Quá hạn 10 phút: {directOrderStats.pendingExpired.toLocaleString("vi-VN")}
-          </p>
+          {initialLoading ? (
+            <SkeletonTable rows={2} cols={1} />
+          ) : (
+            <>
+              <h2>{directOrderStats.pending.toLocaleString("vi-VN")}</h2>
+              <p className="muted" style={{ marginTop: 4 }}>
+                Quá hạn 10 phút: {directOrderStats.pendingExpired.toLocaleString("vi-VN")}
+              </p>
+            </>
+          )}
         </div>
         <div className="card">
           <p className="muted">Tổng direct order</p>
-          <h2>{directOrderStats.total.toLocaleString("vi-VN")}</h2>
+          {initialLoading ? <SkeletonTable rows={2} cols={1} /> : <h2>{directOrderStats.total.toLocaleString("vi-VN")}</h2>}
         </div>
       </div>
 

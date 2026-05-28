@@ -37,6 +37,43 @@ const createEmptyTemplate = (): BotMessageTemplate => ({
 
 const normalizeCustomEmojiId = (value: string) => value.replace(/\D/g, "").slice(0, 64);
 const normalizeTemplateKey = (value: string) => value.toLowerCase().replace(/[^a-z0-9_.:-]/g, "_").slice(0, 80);
+const telegramEmojiPreviewCache = new Map<string, unknown>();
+const telegramEmojiPreviewRequests = new Map<string, Promise<unknown>>();
+
+const fetchTelegramEmojiPreview = async (customEmojiId: string) => {
+  const cached = telegramEmojiPreviewCache.get(customEmojiId);
+  if (cached) return cached;
+  const pending = telegramEmojiPreviewRequests.get(customEmojiId);
+  if (pending) return pending;
+
+  const request = (async () => {
+    const token = (await supabase.auth.getSession()).data.session?.access_token;
+    if (!token) {
+      throw new Error("Chưa đăng nhập");
+    }
+
+    const response = await fetch(
+      `/api/admin/telegram-custom-emoji-preview?customEmojiId=${encodeURIComponent(customEmojiId)}`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: "no-store"
+      }
+    );
+    const json = await response.json().catch(() => null);
+    if (!response.ok || !json?.animationData) {
+      throw new Error(typeof json?.error === "string" ? json.error : "Không thể tải .tgs");
+    }
+    telegramEmojiPreviewCache.set(customEmojiId, json.animationData);
+    return json.animationData;
+  })();
+
+  telegramEmojiPreviewRequests.set(customEmojiId, request);
+  try {
+    return await request;
+  } finally {
+    telegramEmojiPreviewRequests.delete(customEmojiId);
+  }
+};
 
 const formatDateTime = (value: string | null) => {
   if (!value) return "-";
@@ -86,26 +123,7 @@ function TelegramCustomEmojiPreview({
     const loadAnimation = async () => {
       setState("loading");
       setError("");
-      const token = (await supabase.auth.getSession()).data.session?.access_token;
-      if (!token) {
-        setState("error");
-        setError("Chưa đăng nhập");
-        return;
-      }
-
-      const response = await fetch(
-        `/api/admin/telegram-custom-emoji-preview?customEmojiId=${encodeURIComponent(cleanId)}`,
-        {
-          headers: { Authorization: `Bearer ${token}` },
-          cache: "no-store"
-        }
-      );
-      const json = await response.json().catch(() => null);
-      if (!response.ok || !json?.animationData) {
-        setState("error");
-        setError(typeof json?.error === "string" ? json.error : "Không thể tải .tgs");
-        return;
-      }
+      const animationData = await fetchTelegramEmojiPreview(cleanId);
 
       const lottie = await import("lottie-web");
       if (cancelled || !containerRef.current) return;
@@ -115,7 +133,7 @@ function TelegramCustomEmojiPreview({
         renderer: "svg",
         loop: true,
         autoplay: true,
-        animationData: json.animationData
+        animationData
       });
       setState("ready");
     };
@@ -151,6 +169,10 @@ export default function BotMessagesPage() {
   const [saving, setSaving] = useState(false);
   const [filter, setFilter] = useState("");
   const [languageFilter, setLanguageFilter] = useState<"all" | "vi" | "en">("all");
+  const [scopeFilter, setScopeFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | "enabled" | "disabled">("all");
+  const [emojiFilter, setEmojiFilter] = useState<"all" | "custom" | "fallback" | "plain">("all");
+  const [templateKeyFilter, setTemplateKeyFilter] = useState("all");
 
   const selectedId = `${selected.template_key}:${selected.language}`;
 
@@ -166,6 +188,14 @@ export default function BotMessagesPage() {
     const query = filter.trim().toLowerCase();
     return templates.filter((template) => {
       if (languageFilter !== "all" && template.language !== languageFilter) return false;
+      const scope = getTemplateScope(template.template_key);
+      if (scopeFilter !== "all" && scope !== scopeFilter) return false;
+      if (templateKeyFilter !== "all" && template.template_key !== templateKeyFilter) return false;
+      if (statusFilter === "enabled" && !template.enabled) return false;
+      if (statusFilter === "disabled" && template.enabled) return false;
+      if (emojiFilter === "custom" && !template.custom_emoji_id) return false;
+      if (emojiFilter === "fallback" && (template.custom_emoji_id || !template.fallback_emoji)) return false;
+      if (emojiFilter === "plain" && (template.custom_emoji_id || template.fallback_emoji)) return false;
       if (!query) return true;
       return [
         template.template_key,
@@ -173,10 +203,20 @@ export default function BotMessagesPage() {
         template.title,
         template.description || "",
         template.body_text,
-        getTemplateScope(template.template_key)
+        scope
       ].some((value) => value.toLowerCase().includes(query));
     });
-  }, [filter, languageFilter, templates]);
+  }, [emojiFilter, filter, languageFilter, scopeFilter, statusFilter, templateKeyFilter, templates]);
+
+  const scopeOptions = useMemo(
+    () => Array.from(new Set(templates.map((template) => getTemplateScope(template.template_key)))).sort(),
+    [templates]
+  );
+
+  const templateKeyOptions = useMemo(
+    () => Array.from(new Set(templates.map((template) => template.template_key))).sort(),
+    [templates]
+  );
 
   const selectedVariables = selected.variables || [];
   const hasCustomEmojiPreview = Boolean(normalizeCustomEmojiId(selected.custom_emoji_id || ""));
@@ -317,6 +357,49 @@ export default function BotMessagesPage() {
               value={filter}
               onChange={(event) => setFilter(event.target.value)}
             />
+            <select
+              className="select"
+              value={templateKeyFilter}
+              onChange={(event) => setTemplateKeyFilter(event.target.value)}
+            >
+              <option value="all">Tất cả template key</option>
+              {templateKeyOptions.map((templateKey) => (
+                <option key={templateKey} value={templateKey}>
+                  {templateKey}
+                </option>
+              ))}
+            </select>
+            <select
+              className="select"
+              value={scopeFilter}
+              onChange={(event) => setScopeFilter(event.target.value)}
+            >
+              <option value="all">Tất cả scope</option>
+              {scopeOptions.map((scope) => (
+                <option key={scope} value={scope}>
+                  {scope}
+                </option>
+              ))}
+            </select>
+            <select
+              className="select"
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value as "all" | "enabled" | "disabled")}
+            >
+              <option value="all">Tất cả trạng thái</option>
+              <option value="enabled">Enabled</option>
+              <option value="disabled">Disabled</option>
+            </select>
+            <select
+              className="select"
+              value={emojiFilter}
+              onChange={(event) => setEmojiFilter(event.target.value as "all" | "custom" | "fallback" | "plain")}
+            >
+              <option value="all">Tất cả emoji</option>
+              <option value="custom">Custom emoji</option>
+              <option value="fallback">Fallback emoji</option>
+              <option value="plain">Không emoji</option>
+            </select>
             <div className="segmented-control" aria-label="Lọc ngôn ngữ">
               {(["all", "vi", "en"] as const).map((language) => (
                 <button

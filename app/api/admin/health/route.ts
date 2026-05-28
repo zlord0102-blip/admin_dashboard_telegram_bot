@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
 import { getSupabaseAdminClient } from "@/app/api/_shared/supabaseAdmin";
+import { getOrSetServerCache } from "@/app/api/_shared/serverCache";
+import { buildServerTimingHeader, withAdminApiTiming } from "@/app/api/_shared/serverTiming";
 import { buildBinancePayWebhookAlerts } from "@/lib/binancePayWebhookAlerts";
+
+const HEALTH_CACHE_TTL_MS = 5_000;
 
 const SETTING_KEYS = [
   "bank_name",
@@ -194,34 +198,69 @@ async function buildFallbackSnapshot(threshold: number) {
   };
 }
 
-export async function GET(request: NextRequest) {
+async function handleGET(request: NextRequest) {
+  const routeStartedAt = performance.now();
   const adminSession = await requireAdminSession(request);
+  const authDuration = performance.now() - routeStartedAt;
   if (adminSession.ok === false) {
     return adminSession.response;
   }
 
   const url = new URL(request.url);
   const threshold = Math.max(0, Math.min(Number.parseInt(url.searchParams.get("lowStock") || "5", 10) || 5, 500));
+  const bypassCache = url.searchParams.has("_refresh");
   const supabase = getSupabaseAdminClient();
 
   try {
-    const { data, error } = await supabase.rpc("admin_ops_health_snapshot", {
-      p_low_stock_threshold: threshold
-    });
-    if (error) {
-      if (!isMissingRpcError(error.message || "")) {
-        throw error;
+    const healthStartedAt = performance.now();
+    const loader = async () => {
+      const { data, error } = await supabase.rpc("admin_ops_health_snapshot", {
+        p_low_stock_threshold: threshold
+      });
+      if (error) {
+        if (!isMissingRpcError(error.message || "")) {
+          throw error;
+        }
+        return { data: await buildFallbackSnapshot(threshold), fallback: true };
       }
-      return NextResponse.json({ success: true, data: await buildFallbackSnapshot(threshold), fallback: true });
-    }
-    const checkerHealth = await loadCheckerHealthState();
-    return NextResponse.json({ success: true, data: attachCheckerHealth(data, checkerHealth) });
+      const checkerHealth = await loadCheckerHealthState();
+      return { data: attachCheckerHealth(data, checkerHealth), fallback: false };
+    };
+    const { value, hit } = bypassCache
+      ? { value: await loader(), hit: false }
+      : await getOrSetServerCache(`admin-health:v2:${threshold}`, HEALTH_CACHE_TTL_MS, loader);
+    const healthDuration = performance.now() - healthStartedAt;
+    const response = NextResponse.json({
+      success: true,
+      data: value.data,
+      ...(value.fallback ? { fallback: true } : {})
+    });
+    response.headers.set(
+      "Server-Timing",
+      buildServerTimingHeader([
+        { name: "auth", duration: authDuration },
+        { name: "health", duration: healthDuration, description: hit ? "cache-hit" : "cache-miss" },
+        { name: "total", duration: performance.now() - routeStartedAt }
+      ])
+    );
+    response.headers.set("X-Admin-Health-Cache", hit ? "hit" : "miss");
+    return response;
   } catch (error) {
-    return NextResponse.json(
+    const response = NextResponse.json(
       {
         error: error instanceof Error ? error.message : "Không thể tải health snapshot."
       },
       { status: 500 }
     );
+    response.headers.set(
+      "Server-Timing",
+      buildServerTimingHeader([
+        { name: "auth", duration: authDuration },
+        { name: "total", duration: performance.now() - routeStartedAt, description: "error" }
+      ])
+    );
+    return response;
   }
 }
+
+export const GET = withAdminApiTiming("GET /api/admin/health", handleGET);

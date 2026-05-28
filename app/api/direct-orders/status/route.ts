@@ -2,13 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
 import { getSupabaseAdminClient } from "@/app/api/_shared/supabaseAdmin";
 import { recordAdminAuditEvent } from "@/app/api/_shared/adminAudit";
+import { withAdminApiTiming } from "@/app/api/_shared/serverTiming";
 
 const toPositiveId = (value: unknown) => {
   const parsed = Number.parseInt(String(value || ""), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
 
-export async function POST(request: NextRequest) {
+async function handlePOST(request: NextRequest) {
   const adminSession = await requireAdminSession(request);
   if (adminSession.ok === false) {
     return adminSession.response;
@@ -45,3 +46,5 @@ export async function POST(request: NextRequest) {
 
   return NextResponse.json({ success: true, data: { orderId, status } });
 }
+
+export const POST = withAdminApiTiming("POST /api/direct-orders/status", handlePOST);

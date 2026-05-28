@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
-import { buildServerTimingHeader } from "@/app/api/_shared/serverTiming";
+import { buildServerTimingHeader, withAdminApiTiming } from "@/app/api/_shared/serverTiming";
 
-export async function GET(request: NextRequest) {
+async function handleGET(request: NextRequest) {
   const routeStartedAt = performance.now();
   const adminSession = await requireAdminSession(request);
   const authDuration = performance.now() - routeStartedAt;
@@ -37,3 +37,5 @@ export async function GET(request: NextRequest) {
   );
   return response;
 }
+
+export const GET = withAdminApiTiming("GET /api/admin/session", handleGET);

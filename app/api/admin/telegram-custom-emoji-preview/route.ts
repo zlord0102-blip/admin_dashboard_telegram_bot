@@ -1,6 +1,7 @@
 import { gunzipSync } from "node:zlib";
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
+import { withAdminApiTiming } from "@/app/api/_shared/serverTiming";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,7 +27,7 @@ const telegramJson = async <T>(token: string, method: string, body: Record<strin
   return json.result as T;
 };
 
-export async function GET(request: NextRequest) {
+async function handleGET(request: NextRequest) {
   const adminSession = await requireAdminSession(request);
   if (adminSession.ok === false) {
     return adminSession.response;
@@ -100,3 +101,5 @@ export async function GET(request: NextRequest) {
     );
   }
 }
+
+export const GET = withAdminApiTiming("GET /api/admin/telegram-custom-emoji-preview", handleGET);

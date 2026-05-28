@@ -2,8 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
 import { executeCustomCheck } from "./shared";
 import type { CustomCheckRequestBody } from "./shared";
+import { withAdminApiTiming } from "@/app/api/_shared/serverTiming";
 
-export async function POST(request: NextRequest) {
+async function handlePOST(request: NextRequest) {
   const adminSession = await requireAdminSession(request);
   if (adminSession.ok === false) {
     return adminSession.response;
@@ -23,3 +24,7 @@ export async function POST(request: NextRequest) {
 
   return NextResponse.json(result.data);
 }
+
+export const POST = withAdminApiTiming("POST /api/stock/custom-check", handlePOST, {
+  slowThresholdMs: 5_000
+});

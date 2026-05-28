@@ -179,7 +179,6 @@ type UserProfileSummary = {
 const TZ = "Asia/Ho_Chi_Minh";
 const HO_CHI_MINH_OFFSET_MS = 7 * 60 * 60 * 1000;
 const MONTH_KEY_PATTERN = /^(\d{4})-(\d{2})$/;
-const CHECKER_HEALTH_SETTING_KEY = "bot_checker_health";
 
 const normalizeRpcData = (data: unknown): RpcObject => {
   if (Array.isArray(data)) {
@@ -188,21 +187,15 @@ const normalizeRpcData = (data: unknown): RpcObject => {
   return (data as RpcObject) ?? null;
 };
 
-const isMissingRpcError = (message: string) => {
+const isMissingRpcError = (error: string | { code?: string | null; message?: string | null }) => {
+  const code = typeof error === "string" ? "" : String(error.code || "");
+  const message = typeof error === "string" ? error : String(error.message || "");
   const lowered = message.toLowerCase();
   return (
+    code === "PGRST202" ||
     lowered.includes("could not find the function") ||
     lowered.includes("schema cache") ||
     lowered.includes("pgrst202")
-  );
-};
-
-const isMissingRelationError = (message: string) => {
-  const lowered = message.toLowerCase();
-  return (
-    (lowered.includes("relation") && lowered.includes("does not exist")) ||
-    lowered.includes("could not find the table") ||
-    lowered.includes("schema cache")
   );
 };
 
@@ -353,91 +346,133 @@ const createDefaultCheckerHealth = (): DashboardCheckerHealth => ({
   outboxAvailable: false
 });
 
-const computeCheckerState = (
-  heartbeatAt: string | null,
-  intervalSeconds: number,
-  lastError: string | null
-): DashboardCheckerState => {
-  if (!heartbeatAt) {
-    return lastError ? "error" : "unknown";
-  }
-  const heartbeatTime = new Date(heartbeatAt).getTime();
-  if (!Number.isFinite(heartbeatTime)) {
-    return lastError ? "error" : "unknown";
-  }
-  const staleAfterMs = Math.max(30_000, Math.max(1, intervalSeconds) * 3 * 1000 + 20_000);
-  if (Date.now() - heartbeatTime > staleAfterMs) {
-    return "error";
-  }
-  if (lastError) {
-    return "warning";
-  }
-  return "healthy";
-};
-
-const parseCheckerHealthSetting = (rawValue: unknown) => {
-  const text = toOptionalString(rawValue);
-  if (!text) {
-    return {} as Record<string, unknown>;
-  }
-  try {
-    const parsed = JSON.parse(text);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : {};
-  } catch {
-    return {};
-  }
-};
-
-async function loadDashboardCheckerHealth(supabase: SupabaseClient): Promise<DashboardCheckerHealth> {
-  const base = createDefaultCheckerHealth();
-
-  const [{ data: settingData, error: settingError }, pendingRes, sendingRes, failedRes] = await Promise.all([
-    supabase.from("settings").select("value").eq("key", CHECKER_HEALTH_SETTING_KEY).maybeSingle(),
-    supabase.from("bot_delivery_outbox").select("id", { count: "exact", head: true }).eq("status", "pending"),
-    supabase.from("bot_delivery_outbox").select("id", { count: "exact", head: true }).eq("status", "sending"),
-    supabase.from("bot_delivery_outbox").select("id", { count: "exact", head: true }).eq("status", "failed")
-  ]);
-
-  if (settingError) {
-    throw new Error(settingError.message || "Không thể tải trạng thái checker.");
-  }
-
-  const outboxErrors = [pendingRes.error, sendingRes.error, failedRes.error].filter(Boolean);
-  const outboxMissing = outboxErrors.every((error) => isMissingRelationError(error?.message || ""));
-  if (outboxErrors.length && !outboxMissing) {
-    throw new Error(outboxErrors[0]?.message || "Không thể tải trạng thái outbox.");
-  }
-
-  const rawHealth = parseCheckerHealthSetting(settingData?.value);
-  const heartbeatAt = toOptionalString(rawHealth.heartbeatAt);
-  const lastSuccessAt = toOptionalString(rawHealth.lastSuccessAt);
-  const lastError = toOptionalString(rawHealth.lastError);
-  const intervalSeconds = Math.max(1, toNumber(rawHealth.intervalSeconds, 30));
-  const sleepSeconds = Math.max(1, toNumber(rawHealth.sleepSeconds, intervalSeconds));
-
-  return {
-    state: computeCheckerState(heartbeatAt, intervalSeconds, lastError),
-    heartbeatAt,
-    lastSuccessAt,
-    lastError,
-    mode: toOptionalString(rawHealth.mode),
-    intervalSeconds,
-    sleepSeconds,
-    lastDurationMs: rawHealth.lastDurationMs == null ? null : toNumber(rawHealth.lastDurationMs),
-    runtime: toOptionalString(rawHealth.runtime),
-    outboxPending: outboxMissing ? 0 : pendingRes.count ?? 0,
-    outboxSending: outboxMissing ? 0 : sendingRes.count ?? 0,
-    outboxFailed: outboxMissing ? 0 : failedRes.count ?? 0,
-    outboxAvailable: !outboxMissing
-  };
-};
-
 const calcDeltaPercent = (current: number, previous: number) => {
   if (previous <= 0) return current > 0 ? 100 : 0;
   return ((current - previous) / previous) * 100;
 };
+
+const DIRECT_ORDER_STATS_SCAN_LIMIT = 2_000;
+
+async function countDirectOrders(
+  supabase: SupabaseClient,
+  {
+    start,
+    end,
+    status,
+    before
+  }: {
+    start?: Date | null;
+    end?: Date | null;
+    status?: string;
+    before?: Date | null;
+  }
+) {
+  let query = supabase.from("direct_orders").select("id", { count: "exact", head: true });
+  if (start) query = query.gte("created_at", start.toISOString());
+  if (end) query = query.lte("created_at", end.toISOString());
+  if (status) query = query.eq("status", status);
+  if (before) query = query.lt("created_at", before.toISOString());
+  const { count, error } = await query;
+  if (error) throw new Error(error.message || "Không thể tải dữ liệu direct order.");
+  return count ?? 0;
+}
+
+async function loadDirectOrderStatsRows(
+  supabase: SupabaseClient,
+  start: Date | null,
+  end: Date | null
+) {
+  let query = supabase
+    .from("direct_orders")
+    .select("status, created_at", { count: "exact" })
+    .range(0, DIRECT_ORDER_STATS_SCAN_LIMIT - 1);
+  if (start) query = query.gte("created_at", start.toISOString());
+  if (end) query = query.lte("created_at", end.toISOString());
+
+  const { data, error, count } = await query;
+  if (error) throw new Error(error.message || "Không thể tải dữ liệu direct order.");
+  if ((count ?? 0) > DIRECT_ORDER_STATS_SCAN_LIMIT || (count == null && (data?.length ?? 0) >= DIRECT_ORDER_STATS_SCAN_LIMIT)) {
+    return null;
+  }
+  return (data as DirectOrderMetricRow[]) || [];
+}
+
+const buildDirectOrderStatsFromRows = (
+  rows: DirectOrderMetricRow[],
+  pendingExpiredCutoff: Date
+): DirectOrderStats => {
+  let confirmed = 0;
+  let failed = 0;
+  let cancelled = 0;
+  let pending = 0;
+  let pendingExpired = 0;
+
+  for (const row of rows) {
+    const status = String(row.status || "");
+    if (status === "confirmed") {
+      confirmed += 1;
+    } else if (status === "failed") {
+      failed += 1;
+    } else if (status === "cancelled") {
+      cancelled += 1;
+    } else if (status === "pending") {
+      pending += 1;
+      const createdAt = row.created_at ? new Date(row.created_at).getTime() : Number.NaN;
+      if (Number.isFinite(createdAt) && createdAt < pendingExpiredCutoff.getTime()) {
+        pendingExpired += 1;
+      }
+    }
+  }
+
+  const processed = confirmed + failed + cancelled;
+  const failedOverall = failed + cancelled;
+  return {
+    total: rows.length,
+    confirmed,
+    failed,
+    cancelled,
+    pending,
+    pendingExpired,
+    confirmedRate: processed > 0 ? (confirmed / processed) * 100 : 0,
+    failedRate: processed > 0 ? (failedOverall / processed) * 100 : 0
+  };
+};
+
+async function loadDirectOrderStats(
+  supabase: SupabaseClient,
+  start: Date | null,
+  end: Date | null,
+  pendingExpiredBefore: Date
+): Promise<DirectOrderStats> {
+  const pendingExpiredCutoff =
+    end && end.getTime() < pendingExpiredBefore.getTime() ? end : pendingExpiredBefore;
+  const directOrderRows = await loadDirectOrderStatsRows(supabase, start, end);
+  if (directOrderRows) {
+    return buildDirectOrderStatsFromRows(directOrderRows, pendingExpiredCutoff);
+  }
+
+  const [total, confirmed, failed, cancelled, pending, pendingExpired] = await Promise.all([
+    countDirectOrders(supabase, { start, end }),
+    countDirectOrders(supabase, { start, end, status: "confirmed" }),
+    countDirectOrders(supabase, { start, end, status: "failed" }),
+    countDirectOrders(supabase, { start, end, status: "cancelled" }),
+    countDirectOrders(supabase, { start, end, status: "pending" }),
+    countDirectOrders(supabase, { start, end, status: "pending", before: pendingExpiredCutoff })
+  ]);
+
+  const processed = confirmed + failed + cancelled;
+  const failedOverall = failed + cancelled;
+  return {
+    total,
+    confirmed,
+    failed,
+    cancelled,
+    pending,
+    pendingExpired,
+    confirmedRate: processed > 0 ? (confirmed / processed) * 100 : 0,
+    failedRate: processed > 0 ? (failedOverall / processed) * 100 : 0
+  };
+}
 
 const toHoChiMinhDate = (value: Date) => new Date(value.getTime() + HO_CHI_MINH_OFFSET_MS);
 
@@ -737,7 +772,7 @@ const normalizeUsersSnapshot = (data: RpcObject): UsersSnapshot => ({
     total_paid: toNumber(row.total_paid)
   })),
   page: toNumber(data?.page, 1),
-  pageSize: toNumber(data?.pageSize, 50),
+  pageSize: toNumber(data?.pageSize, 20),
   totalCount: toNumber(data?.totalCount),
   totalPages: toNumber(data?.totalPages, 1)
 });
@@ -878,33 +913,24 @@ async function loadReportsSnapshot(
 
   if (period === "all_time") {
     const pendingExpiredBefore = new Date(now.getTime() - 10 * 60 * 1000);
-    const [ordersRes, directOrdersRes] = await Promise.all([
+    const [ordersRes, directOrderStats] = await Promise.all([
       supabase
         .from("orders")
         .select("product_id, price, quantity, created_at")
         .lte("created_at", now.toISOString())
         .order("created_at", { ascending: true }),
-      supabase.from("direct_orders").select("status, created_at").lte("created_at", now.toISOString())
+      loadDirectOrderStats(supabase, null, now, pendingExpiredBefore)
     ]);
 
     if (ordersRes.error) {
       throw new Error(ordersRes.error.message || "Không thể tải dữ liệu báo cáo.");
     }
-    if (directOrdersRes.error) {
-      throw new Error(directOrdersRes.error.message || "Không thể tải dữ liệu direct order.");
-    }
 
     const orderRows = (ordersRes.data as OrderMetricRow[]) || [];
-    const directOrderRows = (directOrdersRes.data as DirectOrderMetricRow[]) || [];
 
     let currentRevenue = 0;
     let currentOrderCount = 0;
     let currentQuantity = 0;
-    let confirmed = 0;
-    let failed = 0;
-    let cancelled = 0;
-    let pending = 0;
-    let pendingExpired = 0;
 
     const trendSeed = new Map<string, DailyTrendRow>();
     const topByProduct = new Map<
@@ -947,25 +973,6 @@ async function loadReportsSnapshot(
       topByProduct.set(productId, current);
     }
 
-    for (const row of directOrderRows) {
-      const status = (row.status || "").toLowerCase();
-      if (status === "confirmed") confirmed += 1;
-      else if (status === "failed") failed += 1;
-      else if (status === "cancelled") cancelled += 1;
-      else if (status === "pending") {
-        pending += 1;
-        if (row.created_at) {
-          const created = new Date(row.created_at);
-          if (!Number.isNaN(created.getTime()) && created < pendingExpiredBefore) {
-            pendingExpired += 1;
-          }
-        }
-      }
-    }
-
-    const total = directOrderRows.length;
-    const processed = confirmed + failed + cancelled;
-    const failedOverall = failed + cancelled;
     const sortedTop = Array.from(topByProduct.values())
       .sort((a, b) => {
         if (b.revenue !== a.revenue) return b.revenue - a.revenue;
@@ -1005,16 +1012,7 @@ async function loadReportsSnapshot(
         averageOrderValue: currentOrderCount > 0 ? currentRevenue / currentOrderCount : 0,
         averageQuantity: currentOrderCount > 0 ? currentQuantity / currentOrderCount : 0
       },
-      directOrderStats: {
-        total,
-        confirmed,
-        failed,
-        cancelled,
-        pending,
-        pendingExpired,
-        confirmedRate: processed > 0 ? (confirmed / processed) * 100 : 0,
-        failedRate: processed > 0 ? (failedOverall / processed) * 100 : 0
-      },
+      directOrderStats,
       dailyTrend: Array.from(trendSeed.values()).sort((a, b) => a.dateKey.localeCompare(b.dateKey)),
       topProducts: sortedTop.map((row) => ({
         productId: row.productId,
@@ -1030,8 +1028,15 @@ async function loadReportsSnapshot(
   const pendingExpiredBefore = new Date(now.getTime() - 10 * 60 * 1000);
   const currentWindowValid = range.current.end.getTime() >= range.current.start.getTime();
   const comparisonWindowValid = range.comparison.end.getTime() >= range.comparison.start.getTime();
+  const directOrderStatsPromise = loadDirectOrderStats(
+    supabase,
+    range.current.start,
+    range.current.end,
+    pendingExpiredBefore
+  );
 
   let orderRows: OrderMetricRow[] = [];
+  let directOrderStats: DirectOrderStats;
   if (currentWindowValid || comparisonWindowValid) {
     const orderRangeStart =
       !comparisonWindowValid || range.current.start.getTime() <= range.comparison.start.getTime()
@@ -1042,31 +1047,25 @@ async function loadReportsSnapshot(
         ? range.current.end
         : range.comparison.end;
 
-    const { data, error } = await supabase
-      .from("orders")
-      .select("product_id, price, quantity, created_at")
-      .gte("created_at", orderRangeStart.toISOString())
-      .lte("created_at", orderRangeEnd.toISOString())
-      .order("created_at", { ascending: true });
+    const [ordersResult, nextDirectOrderStats] = await Promise.all([
+      supabase
+        .from("orders")
+        .select("product_id, price, quantity, created_at")
+        .gte("created_at", orderRangeStart.toISOString())
+        .lte("created_at", orderRangeEnd.toISOString())
+        .order("created_at", { ascending: true }),
+      directOrderStatsPromise
+    ]);
 
-    if (error) {
-      throw new Error(error.message || "Không thể tải dữ liệu báo cáo.");
+    if (ordersResult.error) {
+      throw new Error(ordersResult.error.message || "Không thể tải dữ liệu báo cáo.");
     }
 
-    orderRows = (data as OrderMetricRow[]) || [];
+    orderRows = (ordersResult.data as OrderMetricRow[]) || [];
+    directOrderStats = nextDirectOrderStats;
+  } else {
+    directOrderStats = await directOrderStatsPromise;
   }
-
-  const { data: directOrdersData, error: directOrdersError } = await supabase
-    .from("direct_orders")
-    .select("status, created_at")
-    .gte("created_at", range.current.start.toISOString())
-    .lte("created_at", range.current.end.toISOString());
-
-  if (directOrdersError) {
-    throw new Error(directOrdersError.message || "Không thể tải dữ liệu direct order.");
-  }
-
-  const directOrderRows = (directOrdersData as DirectOrderMetricRow[]) || [];
 
   const isInCurrentWindow = (value: Date) =>
     currentWindowValid &&
@@ -1143,32 +1142,6 @@ async function loadReportsSnapshot(
     }
   }
 
-  let confirmed = 0;
-  let failed = 0;
-  let cancelled = 0;
-  let pending = 0;
-  let pendingExpired = 0;
-
-  for (const row of directOrderRows) {
-    const status = (row.status || "").toLowerCase();
-    if (status === "confirmed") confirmed += 1;
-    else if (status === "failed") failed += 1;
-    else if (status === "cancelled") cancelled += 1;
-    else if (status === "pending") {
-      pending += 1;
-      if (row.created_at) {
-        const created = new Date(row.created_at);
-        if (!Number.isNaN(created.getTime()) && created < pendingExpiredBefore) {
-          pendingExpired += 1;
-        }
-      }
-    }
-  }
-
-  const total = directOrderRows.length;
-  const processed = confirmed + failed + cancelled;
-  const failedOverall = failed + cancelled;
-
   const sortedTop = Array.from(topByProduct.values())
     .sort((a, b) => {
       if (b.revenue !== a.revenue) return b.revenue - a.revenue;
@@ -1208,16 +1181,7 @@ async function loadReportsSnapshot(
       averageOrderValue: currentOrderCount > 0 ? currentRevenue / currentOrderCount : 0,
       averageQuantity: currentOrderCount > 0 ? currentQuantity / currentOrderCount : 0
     },
-    directOrderStats: {
-      total,
-      confirmed,
-      failed,
-      cancelled,
-      pending,
-      pendingExpired,
-      confirmedRate: processed > 0 ? (confirmed / processed) * 100 : 0,
-      failedRate: processed > 0 ? (failedOverall / processed) * 100 : 0
-    },
+    directOrderStats,
     dailyTrend: Array.from(trendSeed.values()),
     topProducts: sortedTop.map((row) => ({
       productId: row.productId,
@@ -1511,18 +1475,26 @@ export async function getUserOrdersSnapshot(
 }
 
 export async function getDashboardSnapshot(supabase: SupabaseClient): Promise<DashboardSnapshot> {
-  let snapshot: DashboardSnapshot;
-  const { data, error } = await supabase.rpc("admin_bot_dashboard_snapshot", { p_recent_limit: 6 });
-  if (error) {
-    if (!isMissingRpcError(error.message || "")) {
-      throw new Error(error.message || "Không thể tải dashboard snapshot.");
-    }
-    snapshot = await loadDashboardFallback(supabase);
-  } else {
-    snapshot = normalizeDashboardSnapshot(normalizeRpcData(data));
+  let snapshot: DashboardSnapshot | null = null;
+  const v1Result = await supabase.rpc("admin_bot_dashboard_snapshot_v1", { p_recent_limit: 6 });
+  if (!v1Result.error) {
+    snapshot = normalizeDashboardSnapshot(normalizeRpcData(v1Result.data));
+  } else if (!isMissingRpcError(v1Result.error)) {
+    throw new Error(v1Result.error.message || "Không thể tải dashboard snapshot.");
   }
 
-  const checkerHealthPromise = loadDashboardCheckerHealth(supabase);
+  if (!snapshot) {
+    const legacyResult = await supabase.rpc("admin_bot_dashboard_snapshot", { p_recent_limit: 6 });
+    if (!legacyResult.error) {
+      snapshot = normalizeDashboardSnapshot(normalizeRpcData(legacyResult.data));
+    } else if (!isMissingRpcError(legacyResult.error)) {
+      throw new Error(legacyResult.error.message || "Không thể tải dashboard snapshot.");
+    }
+  }
+
+  if (!snapshot) {
+    snapshot = await loadDashboardFallback(supabase);
+  }
 
   const missingProfileIds = Array.from(
     new Set(
@@ -1533,20 +1505,13 @@ export async function getDashboardSnapshot(supabase: SupabaseClient): Promise<Da
     )
   );
   if (!missingProfileIds.length) {
-    return {
-      ...snapshot,
-      checkerHealth: await checkerHealthPromise
-    };
+    return snapshot;
   }
 
-  const [userProfilesById, checkerHealth] = await Promise.all([
-    loadUserProfilesByIds(supabase, missingProfileIds),
-    checkerHealthPromise
-  ]);
+  const userProfilesById = await loadUserProfilesByIds(supabase, missingProfileIds);
 
   return {
     ...snapshot,
-    checkerHealth,
     orders: snapshot.orders.map((order) => ({
       ...order,
       username: userProfilesById.get(String(order.user_id))?.username ?? order.username ?? null,
@@ -1559,6 +1524,23 @@ export async function getReportsSnapshot(
   supabase: SupabaseClient,
   params: ReportsSnapshotParams = {}
 ): Promise<ReportsSnapshot> {
+  const period = params.period ?? "month";
+  const rpcResult = await supabase.rpc("admin_bot_reports_snapshot_v2", {
+    p_period: period,
+    p_month: params.month ?? null,
+    p_compare_month: params.compareMonth ?? null,
+    p_tz: TZ,
+    p_expire_minutes: 10
+  });
+
+  if (!rpcResult.error) {
+    return normalizeReportsSnapshot(normalizeRpcData(rpcResult.data));
+  }
+
+  if (!isMissingRpcError(rpcResult.error.message || "")) {
+    throw new Error(rpcResult.error.message || "Không thể tải reports analytics.");
+  }
+
   return loadReportsSnapshot(supabase, params);
 }
 
@@ -1566,7 +1548,7 @@ export async function getUsersSnapshot(
   supabase: SupabaseClient,
   params: UsersSnapshotParams = {}
 ): Promise<UsersSnapshot> {
-  const safePageSize = Math.max(1, Math.min(Math.trunc(params.pageSize || 50) || 50, 200));
+  const safePageSize = Math.max(1, Math.min(Math.trunc(params.pageSize || 20) || 20, 1000));
   const safePage = Math.max(1, Math.trunc(params.page || 1) || 1);
   const keyword = (params.search || "").trim().toLowerCase();
   const filterMode = normalizeUsersFilterMode(params.filterMode);

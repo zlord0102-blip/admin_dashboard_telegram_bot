@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 
 /* ============================================================
    PageHeader
@@ -53,7 +54,9 @@ export function StatCard({
   glow = "green",
   trend,
   trendDir,
-  sub
+  sub,
+  iconButtonLabel,
+  onIconClick
 }: {
   label: string;
   value: string | number;
@@ -62,13 +65,31 @@ export function StatCard({
   trend?: string;
   trendDir?: "up" | "down" | "neutral";
   sub?: ReactNode;
+  iconButtonLabel?: string;
+  onIconClick?: () => void;
 }) {
   const iconColor = { green: "green", blue: "blue", gold: "gold", red: "red", purple: "purple" }[glow];
+  const iconNode = icon ? (
+    <div className={`stat-icon ${iconColor}`}>{icon}</div>
+  ) : null;
+
   return (
     <div className={`stat-card glow-${glow}`}>
       <div className="stat-header">
         <p className="stat-label">{label}</p>
-        {icon && <div className={`stat-icon ${iconColor}`}>{icon}</div>}
+        {iconNode && onIconClick ? (
+          <button
+            type="button"
+            className="stat-icon-button"
+            aria-label={iconButtonLabel || `Xem chi tiết ${label}`}
+            title={iconButtonLabel || `Xem chi tiết ${label}`}
+            onClick={onIconClick}
+          >
+            {iconNode}
+          </button>
+        ) : (
+          iconNode
+        )}
       </div>
       <div className="stat-value">{value}</div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
@@ -78,6 +99,77 @@ export function StatCard({
           </span>
         )}
         {sub && <span style={{ fontSize: 11, color: "var(--muted)" }}>{sub}</span>}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   PaginationControls
+   ============================================================ */
+export const ADMIN_PAGE_SIZE_OPTIONS = [20, 50, 100, 500, 1000] as const;
+
+export function PaginationControls({
+  page,
+  totalPages,
+  totalCount,
+  pageSize,
+  onPageChange,
+  onPageSizeChange,
+  disabled = false,
+  showPageSize = true
+}: {
+  page: number;
+  totalPages: number;
+  totalCount: number;
+  pageSize: number;
+  onPageChange: (page: number) => void;
+  onPageSizeChange: (pageSize: number) => void;
+  disabled?: boolean;
+  showPageSize?: boolean;
+}) {
+  const safeTotalPages = Math.max(1, totalPages);
+  const safePage = Math.min(Math.max(1, page), safeTotalPages);
+
+  return (
+    <div className="pagination-controls">
+      <div className="pagination-summary">
+        Trang {safePage}/{safeTotalPages} · Tổng {totalCount.toLocaleString("vi-VN")}
+      </div>
+      <div className="pagination-actions">
+        {showPageSize && (
+          <label className="pagination-page-size">
+            <span>Mỗi trang</span>
+            <select
+              className="select"
+              value={pageSize}
+              disabled={disabled}
+              onChange={(event) => onPageSizeChange(Number(event.target.value))}
+            >
+              {ADMIN_PAGE_SIZE_OPTIONS.map((option) => (
+                <option key={option} value={option}>
+                  {option === 20 ? "20 (Mặc định)" : option}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        <button
+          className="button secondary"
+          disabled={disabled || safePage === 1}
+          type="button"
+          onClick={() => onPageChange(Math.max(1, safePage - 1))}
+        >
+          Trang trước
+        </button>
+        <button
+          className="button secondary"
+          disabled={disabled || safePage === safeTotalPages}
+          type="button"
+          onClick={() => onPageChange(Math.min(safeTotalPages, safePage + 1))}
+        >
+          Trang sau
+        </button>
       </div>
     </div>
   );
@@ -189,22 +281,70 @@ export function RowActionMenu({
   label?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const [menuStyle, setMenuStyle] = useState<CSSProperties>({});
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const updatePosition = () => {
+      const trigger = triggerRef.current;
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const menuWidth = 176;
+      const menuHeight = menuRef.current?.offsetHeight || Math.min(items.length * 40 + 12, 260);
+      const gap = 6;
+      const viewportPadding = 10;
+      const left = Math.min(
+        Math.max(viewportPadding, rect.right - menuWidth),
+        Math.max(viewportPadding, window.innerWidth - menuWidth - viewportPadding)
+      );
+      const hasSpaceBelow = rect.bottom + gap + menuHeight <= window.innerHeight - viewportPadding;
+      const top = hasSpaceBelow
+        ? rect.bottom + gap
+        : Math.max(viewportPadding, rect.top - menuHeight - gap);
+      setMenuStyle({ left, top, width: menuWidth });
+    };
+
+    const closeOnOutside = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (triggerRef.current?.contains(target) || menuRef.current?.contains(target)) {
+        return;
+      }
+      setOpen(false);
+    };
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
+    };
+
+    updatePosition();
+    document.addEventListener("pointerdown", closeOnOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [open, items.length]);
 
   if (!items.length) {
     return <span className="muted">-</span>;
   }
 
   return (
-    <div
-      className={`action-menu${open ? " is-open" : ""}`}
-      onBlur={(event) => {
-        const nextFocus = event.relatedTarget as Node | null;
-        if (!nextFocus || !event.currentTarget.contains(nextFocus)) {
-          setOpen(false);
-        }
-      }}
-    >
+    <div className={`action-menu${open ? " is-open" : ""}`}>
       <button
+        ref={triggerRef}
         aria-expanded={open}
         aria-haspopup="menu"
         aria-label={label}
@@ -214,25 +354,32 @@ export function RowActionMenu({
       >
         ...
       </button>
-      {open && (
-        <div className="action-menu-list" role="menu">
-          {items.map((item) => (
-            <button
-              className={`action-menu-item${item.tone ? ` ${item.tone}` : ""}`}
-              disabled={item.disabled}
-              key={item.label}
-              role="menuitem"
-              type="button"
-              onClick={() => {
-                setOpen(false);
-                item.onSelect();
-              }}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-      )}
+      {open &&
+        createPortal(
+          <div
+            ref={menuRef}
+            className="action-menu-list action-menu-portal"
+            role="menu"
+            style={menuStyle}
+          >
+            {items.map((item) => (
+              <button
+                className={`action-menu-item${item.tone ? ` ${item.tone}` : ""}`}
+                disabled={item.disabled}
+                key={item.label}
+                role="menuitem"
+                type="button"
+                onClick={() => {
+                  setOpen(false);
+                  item.onSelect();
+                }}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>,
+          document.body
+        )}
     </div>
   );
 }

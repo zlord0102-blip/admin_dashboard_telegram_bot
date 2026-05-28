@@ -1,13 +1,19 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { EmptyState, PageHeader, StatusPill } from "@/components/AdminUi";
+import { EmptyState, PageHeader, SkeletonTable, StatusPill } from "@/components/AdminUi";
 import {
   fetchAdminAuditLogs,
   fetchAdminOpsHealth,
   type AdminAuditLogRow,
   type AdminOpsHealth
 } from "@/lib/adminOpsClient";
+import {
+  ADMIN_API_TIMING_EVENT,
+  clearAdminApiTimingSamples,
+  getAdminApiTimingRanking,
+  type AdminApiTimingRankingRow
+} from "@/lib/adminApiTimingClient";
 
 const formatDateTime = (value: string | null | undefined) => {
   if (!value) return "-";
@@ -33,27 +39,119 @@ const metricNumber = (value: number | null | undefined) =>
 const metricMs = (value: number | null | undefined) =>
   Number.isFinite(Number(value)) ? `${Number(value).toLocaleString("vi-VN")} ms` : "-";
 
+const formatTimingMs = (value: number) =>
+  `${Math.round(value * 10) / 10} ms`;
+
+function ApiTimingRankingCard() {
+  const [rows, setRows] = useState<AdminApiTimingRankingRow[]>([]);
+
+  const refreshRows = () => setRows(getAdminApiTimingRanking(12));
+
+  useEffect(() => {
+    refreshRows();
+    window.addEventListener(ADMIN_API_TIMING_EVENT, refreshRows);
+    return () => window.removeEventListener(ADMIN_API_TIMING_EVENT, refreshRows);
+  }, []);
+
+  return (
+    <div className="card">
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 12 }}>
+        <div>
+          <h3 className="section-title" style={{ marginBottom: 4 }}>Slow Admin API endpoints</h3>
+          <p className="muted">
+            Xếp hạng từ các request thật trong browser hiện tại, ưu tiên `Server-Timing` nếu response có header.
+          </p>
+        </div>
+        <button
+          type="button"
+          className="button secondary"
+          onClick={() => {
+            clearAdminApiTimingSamples();
+            refreshRows();
+          }}
+          disabled={!rows.length}
+        >
+          Xóa mẫu
+        </button>
+      </div>
+
+      {!rows.length ? (
+        <EmptyState
+          title="Chưa có mẫu API"
+          description="Mở vài tab hoặc bấm làm mới để thu thập timing từ response Admin API."
+        />
+      ) : (
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Endpoint</th>
+              <th>Count</th>
+              <th>Avg</th>
+              <th>Max</th>
+              <th>Last</th>
+              <th>Status</th>
+              <th>Source</th>
+              <th>Cache</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={`${row.method}:${row.route}`}>
+                <td>
+                  <code>{row.route}</code>
+                  <div className="muted" style={{ fontSize: 11 }}>{formatDateTime(row.lastAt)}</div>
+                </td>
+                <td>{row.count.toLocaleString("vi-VN")}</td>
+                <td>{formatTimingMs(row.avgMs)}</td>
+                <td>
+                  <StatusPill tone={row.maxMs >= 1_000 ? "danger" : row.maxMs >= 500 ? "warning" : "success"}>
+                    {formatTimingMs(row.maxMs)}
+                  </StatusPill>
+                </td>
+                <td>{formatTimingMs(row.lastMs)}</td>
+                <td>
+                  <StatusPill tone={row.errorCount > 0 || row.lastStatus >= 400 ? "danger" : "success"}>
+                    {row.lastStatus || "ERR"}
+                  </StatusPill>
+                </td>
+                <td>{row.serverSampleCount > 0 ? "server" : "client"}</td>
+                <td>{row.cache || "-"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
 export default function HealthPage() {
   const [health, setHealth] = useState<AdminOpsHealth | null>(null);
   const [logs, setLogs] = useState<AdminAuditLogRow[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [healthLoading, setHealthLoading] = useState(true);
+  const [auditLoading, setAuditLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const load = async () => {
-    setLoading(true);
+  const load = async ({ force = false }: { force?: boolean } = {}) => {
+    setHealthLoading(true);
+    setAuditLoading(true);
     setError(null);
-    try {
-      const [nextHealth, audit] = await Promise.all([
-        fetchAdminOpsHealth(5),
-        fetchAdminAuditLogs(30).catch(() => ({ logs: [] }))
-      ]);
+    const healthRequest = fetchAdminOpsHealth(5, { force })
+      .then((nextHealth) => {
       setHealth(nextHealth);
-      setLogs(audit.logs);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Không thể tải health snapshot.");
-    } finally {
-      setLoading(false);
-    }
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : "Không thể tải health snapshot.");
+        setHealth(null);
+      })
+      .finally(() => setHealthLoading(false));
+
+    const auditRequest = fetchAdminAuditLogs(30, { force })
+      .then((audit) => setLogs(audit.logs))
+      .catch(() => setLogs([]))
+      .finally(() => setAuditLoading(false));
+
+    await Promise.all([healthRequest, auditRequest]);
   };
 
   useEffect(() => {
@@ -84,8 +182,13 @@ export default function HealthPage() {
         title="System Health"
         description="Kiểm tra schema, hàng chờ giao hàng, pending payment và audit log."
         actions={
-          <button className="button secondary" type="button" onClick={load} disabled={loading}>
-            Làm mới
+          <button
+            className="button secondary"
+            type="button"
+            onClick={() => load({ force: true })}
+            disabled={healthLoading || auditLoading}
+          >
+            {healthLoading || auditLoading ? "Đang tải..." : "Làm mới"}
           </button>
         }
       />
@@ -94,6 +197,23 @@ export default function HealthPage() {
         <div className="card compact-card" style={{ borderColor: "rgba(194, 65, 58, 0.32)" }}>
           <p style={{ color: "var(--danger)" }}>{error}</p>
         </div>
+      )}
+
+      <ApiTimingRankingCard />
+
+      {healthLoading && !health && (
+        <>
+          <div className="grid stats">
+            <div className="card"><SkeletonTable rows={2} cols={1} /></div>
+            <div className="card"><SkeletonTable rows={2} cols={1} /></div>
+            <div className="card"><SkeletonTable rows={2} cols={1} /></div>
+            <div className="card"><SkeletonTable rows={2} cols={1} /></div>
+          </div>
+          <div className="card">
+            <h3 className="section-title">Schema checklist</h3>
+            <SkeletonTable rows={5} cols={3} />
+          </div>
+        </>
       )}
 
       {health && (
@@ -306,7 +426,11 @@ export default function HealthPage() {
       <div className="card">
         <h3 className="section-title">Audit log gần đây</h3>
         {!logs.length ? (
-          <EmptyState title="Chưa có audit log" description="Audit log sẽ xuất hiện sau khi apply SQL mới và có thao tác admin." />
+          auditLoading ? (
+            <SkeletonTable rows={5} cols={4} />
+          ) : (
+            <EmptyState title="Chưa có audit log" description="Audit log sẽ xuất hiện sau khi apply SQL mới và có thao tác admin." />
+          )
         ) : (
           <table className="table">
             <thead>
