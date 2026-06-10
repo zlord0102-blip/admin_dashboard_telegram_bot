@@ -80,6 +80,46 @@ class LicenseRuntimeMigrationError extends Error {
 const LICENSE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const toTrimmedString = (value: unknown) => String(value || "").trim();
 
+const LICENSE_CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
+  "Access-Control-Expose-Headers":
+    "Retry-After, Server-Timing, X-Admin-Api-Route, X-Admin-Api-Duration-Ms, X-Admin-Api-Cache, X-Admin-Api-Slow",
+  "Access-Control-Max-Age": "86400"
+};
+
+export const applyLicenseCors = (response: Response) => {
+  try {
+    for (const [key, value] of Object.entries(LICENSE_CORS_HEADERS)) {
+      response.headers.set(key, value);
+    }
+    return response;
+  } catch {
+    const headers = new Headers(response.headers);
+    for (const [key, value] of Object.entries(LICENSE_CORS_HEADERS)) {
+      headers.set(key, value);
+    }
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers
+    });
+  }
+};
+
+export const licenseCorsPreflight = () =>
+  new Response(null, {
+    status: 204,
+    headers: LICENSE_CORS_HEADERS
+  });
+
+export function withLicenseCors<TArgs extends unknown[]>(
+  handler: (request: NextRequest, ...args: TArgs) => Promise<Response> | Response
+) {
+  return async (request: NextRequest, ...args: TArgs) => applyLicenseCors(await handler(request, ...args));
+}
+
 export const normalizeExtensionCode = (value: unknown) =>
   toTrimmedString(value)
     .toUpperCase()

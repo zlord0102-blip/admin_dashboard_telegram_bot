@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
-import { listLicenseActivations } from "@/app/api/_shared/license";
+import { licenseCorsPreflight, listLicenseActivations, withLicenseCors } from "@/app/api/_shared/license";
 import { getOrSetServerCache } from "@/app/api/_shared/serverCache";
 import { withAdminApiTiming } from "@/app/api/_shared/serverTiming";
 
@@ -40,4 +40,5 @@ async function handleGET(request: NextRequest) {
   }
 }
 
-export const GET = withAdminApiTiming("GET /api/licenses/activations", handleGET);
+export const GET = withLicenseCors(withAdminApiTiming("GET /api/licenses/activations", handleGET));
+export const OPTIONS = licenseCorsPreflight;

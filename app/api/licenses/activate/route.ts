@@ -6,14 +6,16 @@ import {
   getLicenseServiceUnavailableBody,
   getRequestIp,
   logLicenseServiceError,
+  licenseCorsPreflight,
   normalizeExtensionCode,
   normalizeFingerprint,
   normalizeLicenseKey,
   normalizeOptionalVersion,
-  runActivateLicenseRpc
+  runActivateLicenseRpc,
+  withLicenseCors
 } from "@/app/api/_shared/license";
 
-export async function POST(request: NextRequest) {
+async function handlePOST(request: NextRequest) {
   let body: {
     extensionCode?: string;
     licenseKey?: string;
@@ -75,3 +77,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(getLicenseServiceUnavailableBody(), { status: 503 });
   }
 }
+
+export const POST = withLicenseCors(handlePOST);
+export const OPTIONS = licenseCorsPreflight;

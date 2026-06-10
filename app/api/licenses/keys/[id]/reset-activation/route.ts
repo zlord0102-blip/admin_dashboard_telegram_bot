@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
+import { licenseCorsPreflight, withLicenseCors } from "@/app/api/_shared/license";
 import { invalidateServerCacheByPrefix } from "@/app/api/_shared/serverCache";
 import { withAdminApiTiming } from "@/app/api/_shared/serverTiming";
 
@@ -55,4 +56,5 @@ async function handlePOST(
   return NextResponse.json({ success: true, data: { ok: true } });
 }
 
-export const POST = withAdminApiTiming("POST /api/licenses/keys/[id]/reset-activation", handlePOST);
+export const POST = withLicenseCors(withAdminApiTiming("POST /api/licenses/keys/[id]/reset-activation", handlePOST));
+export const OPTIONS = licenseCorsPreflight;

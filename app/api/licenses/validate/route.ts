@@ -4,15 +4,17 @@ import { checkRateLimit, getClientIp } from "@/app/api/_shared/rateLimit";
 import {
   getLicenseServiceUnavailableBody,
   getRequestIp,
+  licenseCorsPreflight,
   logLicenseServiceError,
   normalizeExtensionCode,
   normalizeFingerprint,
   normalizeOptionalVersion,
   normalizeOptionalText,
-  runValidateLicenseRpc
+  runValidateLicenseRpc,
+  withLicenseCors
 } from "@/app/api/_shared/license";
 
-export async function POST(request: NextRequest) {
+async function handlePOST(request: NextRequest) {
   let body: {
     extensionCode?: string;
     activationToken?: string;
@@ -64,3 +66,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(getLicenseServiceUnavailableBody(), { status: 503 });
   }
 }
+
+export const POST = withLicenseCors(handlePOST);
+export const OPTIONS = licenseCorsPreflight;

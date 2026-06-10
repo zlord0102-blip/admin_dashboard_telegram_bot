@@ -6,10 +6,12 @@ import {
   getKeyPrefix,
   getKeySuffix,
   hashSecret,
+  licenseCorsPreflight,
   listLicenseKeys,
   maskLicenseKey,
   normalizeLicenseKeyDeviceLimitMode,
-  normalizeOptionalText
+  normalizeOptionalText,
+  withLicenseCors
 } from "@/app/api/_shared/license";
 import type { LicenseKeyAdminStatus, LicenseKeyDeviceLimitMode } from "@/lib/licenseTypes";
 import { getOrSetServerCache, invalidateServerCacheByPrefix } from "@/app/api/_shared/serverCache";
@@ -247,5 +249,6 @@ async function handlePOST(request: NextRequest) {
   });
 }
 
-export const GET = withAdminApiTiming("GET /api/licenses/keys", handleGET);
-export const POST = withAdminApiTiming("POST /api/licenses/keys", handlePOST);
+export const GET = withLicenseCors(withAdminApiTiming("GET /api/licenses/keys", handleGET));
+export const POST = withLicenseCors(withAdminApiTiming("POST /api/licenses/keys", handlePOST));
+export const OPTIONS = licenseCorsPreflight;

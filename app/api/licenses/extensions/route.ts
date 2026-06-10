@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
-import { listLicenseExtensions, normalizeExtensionCode, normalizeOptionalText } from "@/app/api/_shared/license";
+import {
+  licenseCorsPreflight,
+  listLicenseExtensions,
+  normalizeExtensionCode,
+  normalizeOptionalText,
+  withLicenseCors
+} from "@/app/api/_shared/license";
 import { getOrSetServerCache, invalidateServerCacheByPrefix } from "@/app/api/_shared/serverCache";
 import { withAdminApiTiming } from "@/app/api/_shared/serverTiming";
 
@@ -172,5 +178,6 @@ async function handlePOST(request: NextRequest) {
   return NextResponse.json({ success: true, data: { ok: true, id: data?.id } });
 }
 
-export const GET = withAdminApiTiming("GET /api/licenses/extensions", handleGET);
-export const POST = withAdminApiTiming("POST /api/licenses/extensions", handlePOST);
+export const GET = withLicenseCors(withAdminApiTiming("GET /api/licenses/extensions", handleGET));
+export const POST = withLicenseCors(withAdminApiTiming("POST /api/licenses/extensions", handlePOST));
+export const OPTIONS = licenseCorsPreflight;
