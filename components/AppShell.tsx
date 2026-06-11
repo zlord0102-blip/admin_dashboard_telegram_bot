@@ -85,6 +85,12 @@ const Icons = {
       <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
     </svg>
   ),
+  mail: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="5" width="18" height="14" rx="2"/>
+      <path d="m3 7 9 6 9-6"/>
+    </svg>
+  ),
   licenses: (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
@@ -173,6 +179,7 @@ const navGroups = [
   {
     label: "System",
     items: [
+      { href: "/mail-manager", label: "Mail Manager", icon: Icons.mail },
       { href: "/bot-messages", label: "Bot Messages", icon: Icons.botMessages },
       { href: "/licenses",     label: "Licenses",     icon: Icons.licenses },
       { href: "/settings",     label: "Settings",     icon: Icons.settings },
@@ -199,7 +206,12 @@ function getInitials(email: string | null): string {
 }
 
 function needsVerifiedAdminSession(pathname: string) {
-  return pathname === "/products" || pathname.startsWith("/products/");
+  return (
+    pathname === "/products" ||
+    pathname.startsWith("/products/") ||
+    pathname === "/mail-manager" ||
+    pathname.startsWith("/mail-manager/")
+  );
 }
 
 /* ── Component ────────────────────────────────────────────── */
