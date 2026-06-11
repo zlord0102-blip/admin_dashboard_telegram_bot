@@ -6,6 +6,7 @@ import { ConfirmDialog, DataTable, EmptyState, PageHeader, RowActionMenu, Sectio
 
 type MailOtpGate = {
   id: number;
+  displayOrder: number;
   email: string;
   normalizedEmail: string;
   active: boolean;
@@ -22,6 +23,7 @@ type MailOtpGate = {
 
 type GeneratedOtp = {
   id: number;
+  displayOrder: number;
   email: string;
   normalizedEmail: string;
   otp: string;
@@ -49,7 +51,8 @@ type RandomOtpResult = {
   gates: MailOtpGate[];
   generatedOtps: GeneratedOtp[];
   count: number;
-  scope: "all" | "ids";
+  scope: "all" | "ids" | "filter";
+  batch?: BatchPreview;
 };
 
 type FillMissingOtpResult = {
@@ -58,6 +61,53 @@ type FillMissingOtpResult = {
   count: number;
   missingOtpCount: number;
   remainingMissingOtpCount: number;
+};
+
+type MailManagerFilterPayload = {
+  query: string;
+  status: "all" | "active" | "inactive";
+};
+
+type BatchTargetScope = "selected" | "filtered";
+
+type BatchPreview = {
+  operation: string;
+  scope: "ids" | "filter" | "all";
+  filter?: MailManagerFilterPayload;
+  count: number;
+  requestedCount: number;
+  limit: number;
+  idsPreview: number[];
+  emailsPreview: string[];
+};
+
+type BatchPreviewResult = {
+  preview: BatchPreview;
+};
+
+type PendingBatchAction = {
+  targetScope: BatchTargetScope;
+  preview: BatchPreview;
+};
+
+type BusyAction = "import" | "random" | "fill_missing" | "bulk_edit" | "bulk_delete" | "batch_preview";
+
+type BulkEditResult = {
+  gates: MailOtpGate[];
+  count: number;
+  requestedCount: number;
+  activeChanged: boolean;
+  noteChanged: boolean;
+  otpChanged: boolean;
+  batch?: BatchPreview;
+};
+
+type BulkDeleteResult = {
+  deletedIds: number[];
+  deletedGates: MailOtpGate[];
+  count: number;
+  requestedCount: number;
+  batch?: BatchPreview;
 };
 
 type StatusState = {
@@ -73,7 +123,15 @@ type DraftState = {
   note: string;
 };
 
+type BulkEditDraft = {
+  activeMode: "keep" | "active" | "inactive";
+  noteMode: "keep" | "replace" | "clear";
+  note: string;
+  otp: string;
+};
+
 type CsvImportRow = {
+  position?: string;
   email?: string;
   otp?: string;
   active?: string;
@@ -93,6 +151,13 @@ const createEmptyDraft = (): DraftState => ({
   otp: "",
   active: true,
   note: ""
+});
+
+const createEmptyBulkEditDraft = (): BulkEditDraft => ({
+  activeMode: "keep",
+  noteMode: "keep",
+  note: "",
+  otp: ""
 });
 
 const formatDateTime = (value: string | null) => {
@@ -186,6 +251,13 @@ const normalizeCsvHeader = (value: string) =>
     .replace(/[\s-]+/g, "_");
 
 const headerAliases: Record<string, keyof CsvImportRow> = {
+  position: "position",
+  display_order: "position",
+  order: "position",
+  sort_order: "position",
+  index: "position",
+  stt: "position",
+  vi_tri: "position",
   email: "email",
   mail: "email",
   address: "email",
@@ -231,8 +303,9 @@ const parseCsvForImport = (text: string) => {
 };
 
 const buildGateCsvRows = (gates: MailOtpGate[]) => [
-  ["email", "otp", "active", "note", "has_otp", "check_count", "verify_count", "last_checked_at", "last_verified_at", "updated_at"],
+  ["position", "email", "otp", "active", "note", "has_otp", "check_count", "verify_count", "last_checked_at", "last_verified_at", "updated_at"],
   ...gates.map((gate) => [
+    gate.displayOrder || "",
     gate.email,
     gate.otp || "",
     gate.active ? "true" : "false",
@@ -247,8 +320,8 @@ const buildGateCsvRows = (gates: MailOtpGate[]) => [
 ];
 
 const buildGeneratedOtpCsvRows = (items: GeneratedOtp[]) => [
-  ["email", "otp"],
-  ...items.map((item) => [item.email, item.otp])
+  ["position", "email", "otp"],
+  ...items.map((item) => [item.displayOrder || "", item.email, item.otp])
 ];
 
 const downloadGeneratedOtpsCsv = (items: GeneratedOtp[], prefix = "mail-manager-generated-otps") => {
@@ -257,18 +330,28 @@ const downloadGeneratedOtpsCsv = (items: GeneratedOtp[], prefix = "mail-manager-
   downloadCsv(`${prefix}-${date}.csv`, buildGeneratedOtpCsvRows(items));
 };
 
+const downloadGateBatchCsv = (gates: MailOtpGate[], prefix: string) => {
+  if (!gates.length) return;
+  const date = new Date().toISOString().slice(0, 10);
+  downloadCsv(`${prefix}-${date}.csv`, buildGateCsvRows(gates));
+};
+
 export default function MailManagerPage() {
   const [gates, setGates] = useState<MailOtpGate[]>([]);
   const [draft, setDraft] = useState<DraftState>(createEmptyDraft);
   const [status, setStatus] = useState<StatusState>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [busyAction, setBusyAction] = useState<null | "import" | "random" | "fill_missing">(null);
+  const [busyAction, setBusyAction] = useState<BusyAction | null>(null);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "active" | "inactive">("all");
   const [pendingDelete, setPendingDelete] = useState<MailOtpGate | null>(null);
   const [pendingRandom, setPendingRandom] = useState<PendingRandom | null>(null);
   const [pendingFillMissing, setPendingFillMissing] = useState(false);
+  const [pendingBulkEdit, setPendingBulkEdit] = useState<PendingBatchAction | null>(null);
+  const [pendingBulkDelete, setPendingBulkDelete] = useState<PendingBatchAction | null>(null);
+  const [bulkEditDraft, setBulkEditDraft] = useState<BulkEditDraft>(createEmptyBulkEditDraft);
+  const [batchTargetScope, setBatchTargetScope] = useState<BatchTargetScope>("selected");
   const [selectedGateIds, setSelectedGateIds] = useState<Set<number>>(new Set());
   const [missingOtpCount, setMissingOtpCount] = useState(0);
   const [generatedOtps, setGeneratedOtps] = useState<GeneratedOtp[]>([]);
@@ -300,9 +383,15 @@ export default function MailManagerPage() {
     [filteredGates, selectedGateIds]
   );
 
+  const currentFilterPayload = useMemo<MailManagerFilterPayload>(
+    () => ({ query: query.trim(), status: statusFilter }),
+    [query, statusFilter]
+  );
   const generatedOtpCsvRows = useMemo(() => buildGeneratedOtpCsvRows(generatedOtps), [generatedOtps]);
   const generatedOtpCsvText = useMemo(() => toCsvText(generatedOtpCsvRows), [generatedOtpCsvRows]);
   const hasBusyAction = Boolean(busyAction);
+  const hasBatchCandidates = batchTargetScope === "selected" ? selectedGateIds.size > 0 : filteredGates.length > 0;
+  const batchTargetLabel = batchTargetScope === "selected" ? "mail đã chọn" : "kết quả lọc";
 
   useEffect(() => {
     const element = selectAllRef.current;
@@ -449,64 +538,219 @@ export default function MailManagerPage() {
     });
   };
 
+  const publishGeneratedOtps = (items: GeneratedOtp[], options: { autoDownloadPrefix?: string } = {}) => {
+    setGeneratedOtps(items);
+    if (items.length && options.autoDownloadPrefix) downloadGeneratedOtpsCsv(items, options.autoDownloadPrefix);
+  };
+
+  const runBatchAction = async <T,>(
+    action: BusyAction,
+    request: () => Promise<T>,
+    onSuccess: (data: T) => Promise<void> | void,
+    fallbackError: string
+  ) => {
+    setBusyAction(action);
+    try {
+      const data = await request();
+      await onSuccess(data);
+    } catch (error) {
+      setStatus({
+        tone: "danger",
+        text: error instanceof Error ? error.message : fallbackError
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const buildBatchTargetPayload = (targetScope: BatchTargetScope, preview?: BatchPreview) => {
+    if (targetScope === "selected") return { scope: "ids", ids: Array.from(selectedGateIds) };
+    return { scope: "filter", filter: preview?.filter || currentFilterPayload };
+  };
+
+  const previewBatchAction = async (operation: "bulk_edit" | "bulk_delete", targetScope: BatchTargetScope) => {
+    const data = await adminApiRequest<BatchPreviewResult>("/api/admin/mail-manager", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "preview_batch",
+        operation,
+        ...buildBatchTargetPayload(targetScope)
+      })
+    });
+    return data.preview;
+  };
+
+  const openBulkEdit = async () => {
+    if (!hasBatchCandidates) {
+      setStatus({ tone: "warning", text: `Không có ${batchTargetLabel} để Bulk Edit.` });
+      return;
+    }
+
+    setBusyAction("batch_preview");
+    try {
+      const preview = await previewBatchAction("bulk_edit", batchTargetScope);
+      if (!preview.count) {
+        setStatus({ tone: "warning", text: "Filter hiện tại không match mail nào để Bulk Edit." });
+        return;
+      }
+      setBulkEditDraft(createEmptyBulkEditDraft());
+      setPendingBulkEdit({ targetScope: batchTargetScope, preview });
+      setStatus(null);
+    } catch (error) {
+      setStatus({
+        tone: "danger",
+        text: error instanceof Error ? error.message : "Không thể preview Bulk Edit."
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const openBulkDelete = async () => {
+    if (!hasBatchCandidates) {
+      setStatus({ tone: "warning", text: `Không có ${batchTargetLabel} để Bulk Delete.` });
+      return;
+    }
+
+    setBusyAction("batch_preview");
+    try {
+      const preview = await previewBatchAction("bulk_delete", batchTargetScope);
+      if (!preview.count) {
+        setStatus({ tone: "warning", text: "Filter hiện tại không match mail nào để Bulk Delete." });
+        return;
+      }
+      setPendingBulkDelete({ targetScope: batchTargetScope, preview });
+      setStatus(null);
+    } catch (error) {
+      setStatus({
+        tone: "danger",
+        text: error instanceof Error ? error.message : "Không thể preview Bulk Delete."
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const confirmRandomOtp = async () => {
     if (!pendingRandom) return;
-    setBusyAction("random");
-    try {
-      const data = await adminApiRequest<RandomOtpResult>("/api/admin/mail-manager", {
+    await runBatchAction<RandomOtpResult>(
+      "random",
+      () => adminApiRequest<RandomOtpResult>("/api/admin/mail-manager", {
         method: "POST",
         body: JSON.stringify({
           action: "random_otp",
           scope: pendingRandom.scope,
           ids: pendingRandom.ids
         })
-      });
-      setGeneratedOtps(data.generatedOtps || []);
-      await loadGates(true);
-      setStatus({
-        tone: "success",
-        text: `Đã random OTP cho ${data.count.toLocaleString("vi-VN")} mail. Lưu lại danh sách OTP vừa tạo trước khi rời trang.`
-      });
-      setPendingRandom(null);
-    } catch (error) {
-      setStatus({
-        tone: "danger",
-        text: error instanceof Error ? error.message : "Không thể random OTP."
-      });
-    } finally {
-      setBusyAction(null);
-    }
+      }),
+      async (data) => {
+        publishGeneratedOtps(data.generatedOtps || []);
+        await loadGates(true);
+        setStatus({
+          tone: "success",
+          text: `Đã random OTP cho ${data.count.toLocaleString("vi-VN")} mail. Lưu lại danh sách OTP vừa tạo trước khi rời trang.`
+        });
+        setPendingRandom(null);
+      },
+      "Không thể random OTP."
+    );
   };
 
   const confirmFillMissingOtp = async () => {
-    setBusyAction("fill_missing");
-    try {
-      const data = await adminApiRequest<FillMissingOtpResult>("/api/admin/mail-manager", {
+    await runBatchAction<FillMissingOtpResult>(
+      "fill_missing",
+      () => adminApiRequest<FillMissingOtpResult>("/api/admin/mail-manager", {
         method: "POST",
         body: JSON.stringify({ action: "fill_missing_otp" })
-      });
-      const items = data.generatedOtps || [];
-      setGeneratedOtps(items);
-      setMissingOtpCount(Number(data.remainingMissingOtpCount || 0));
-      if (items.length) downloadGeneratedOtpsCsv(items, "mail-manager-fill-missing-otps");
-      await loadGates(true);
-      setStatus({
-        tone: "success",
-        text: data.count
-          ? `Đã fill OTP cho ${data.count.toLocaleString("vi-VN")} legacy mail và đã xuất CSV OTP vừa tạo.`
-          : "Không còn legacy mail thiếu OTP để fill."
-      });
-      setPendingFillMissing(false);
-    } catch (error) {
-      setStatus({
-        tone: "danger",
-        text: error instanceof Error ? error.message : "Không thể fill missing OTP."
-      });
-    } finally {
-      setBusyAction(null);
-    }
+      }),
+      async (data) => {
+        const items = data.generatedOtps || [];
+        publishGeneratedOtps(items, { autoDownloadPrefix: "mail-manager-fill-missing-otps" });
+        setMissingOtpCount(Number(data.remainingMissingOtpCount || 0));
+        await loadGates(true);
+        setStatus({
+          tone: "success",
+          text: data.count
+            ? `Đã fill OTP cho ${data.count.toLocaleString("vi-VN")} legacy mail và đã xuất CSV OTP vừa tạo.`
+            : "Không còn legacy mail thiếu OTP để fill."
+        });
+        setPendingFillMissing(false);
+      },
+      "Không thể fill missing OTP."
+    );
   };
 
+  const confirmBulkEdit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!pendingBulkEdit) return;
+
+    const otp = bulkEditDraft.otp.trim();
+    const activeChanged = bulkEditDraft.activeMode !== "keep";
+    const noteChanged = bulkEditDraft.noteMode !== "keep";
+    if (!activeChanged && !noteChanged && !otp) {
+      setStatus({ tone: "warning", text: "Chọn ít nhất 1 trường để Bulk Edit." });
+      return;
+    }
+
+    await runBatchAction<BulkEditResult>(
+      "bulk_edit",
+      () => adminApiRequest<BulkEditResult>("/api/admin/mail-manager", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "bulk_edit",
+          ...buildBatchTargetPayload(pendingBulkEdit.targetScope, pendingBulkEdit.preview),
+          activeMode: bulkEditDraft.activeMode,
+          noteMode: bulkEditDraft.noteMode,
+          note: bulkEditDraft.note,
+          otp
+        })
+      }),
+      async (data) => {
+        const fields = [
+          data.activeChanged ? "trạng thái" : "",
+          data.noteChanged ? "ghi chú" : "",
+          data.otpChanged ? "OTP" : ""
+        ].filter(Boolean).join(", ");
+        setGeneratedOtps([]);
+        downloadGateBatchCsv(data.gates || [], "mail-manager-bulk-edit-affected");
+        await loadGates(true);
+        setPendingBulkEdit(null);
+        setBulkEditDraft(createEmptyBulkEditDraft());
+        setStatus({
+          tone: "success",
+          text: `Đã Bulk Edit ${data.count.toLocaleString("vi-VN")} mail${fields ? ` (${fields})` : ""} và đã xuất CSV affected rows.`
+        });
+      },
+      "Không thể Bulk Edit mail."
+    );
+  };
+
+  const confirmBulkDelete = async () => {
+    if (!pendingBulkDelete) return;
+
+    await runBatchAction<BulkDeleteResult>(
+      "bulk_delete",
+      () => adminApiRequest<BulkDeleteResult>("/api/admin/mail-manager", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "bulk_delete",
+          ...buildBatchTargetPayload(pendingBulkDelete.targetScope, pendingBulkDelete.preview)
+        })
+      }),
+      async (data) => {
+        if (draft.id && data.deletedIds.includes(draft.id)) setDraft(createEmptyDraft());
+        setGeneratedOtps([]);
+        downloadGateBatchCsv(data.deletedGates || [], "mail-manager-bulk-delete-affected");
+        await loadGates(true);
+        setPendingBulkDelete(null);
+        setStatus({
+          tone: "success",
+          text: `Đã Bulk Delete ${data.count.toLocaleString("vi-VN")} mail khỏi Mail Manager và đã xuất CSV affected rows.`
+        });
+      },
+      "Không thể Bulk Delete mail."
+    );
+  };
   const handleImportCsv = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -529,11 +773,11 @@ export default function MailManagerPage() {
       });
       const mergedErrors = [...parsed.errors, ...(data.errors || [])].slice(0, 25);
       setImportErrors(mergedErrors);
-      setGeneratedOtps(data.generatedOtps || []);
+      publishGeneratedOtps(data.generatedOtps || []);
       await loadGates(true);
       setStatus({
         tone: mergedErrors.length ? "warning" : "success",
-        text: `Đã import ${data.importedCount.toLocaleString("vi-VN")}/${data.requestedCount.toLocaleString("vi-VN")} dòng. ${data.generatedOtpCount.toLocaleString("vi-VN")} OTP được random, ${data.providedOtpCount.toLocaleString("vi-VN")} OTP lấy từ CSV.`
+        text: `Đã import ${data.importedCount.toLocaleString("vi-VN")}/${data.requestedCount.toLocaleString("vi-VN")} dòng và giữ vị trí CSV. ${data.generatedOtpCount.toLocaleString("vi-VN")} OTP được random, ${data.providedOtpCount.toLocaleString("vi-VN")} OTP lấy từ CSV.`
       });
     } catch (error) {
       setStatus({
@@ -638,7 +882,20 @@ export default function MailManagerPage() {
           <div className="mail-manager-bulk-actions">
             <div className="mail-manager-fill-preview">
               <span className="muted">Đã chọn: {selectedGateIds.size.toLocaleString("vi-VN")}</span>
+              <span className="muted">Đang lọc: {filteredGates.length.toLocaleString("vi-VN")} hiển thị</span>
               <strong>{missingOtpCount.toLocaleString("vi-VN")} legacy mail thiếu OTP</strong>
+              <label className="mail-manager-batch-scope">
+                <span>Phạm vi batch</span>
+                <select
+                  className="select"
+                  value={batchTargetScope}
+                  disabled={hasBusyAction}
+                  onChange={(event) => setBatchTargetScope(event.target.value as BatchTargetScope)}
+                >
+                  <option value="selected">Mail đã chọn</option>
+                  <option value="filtered">Toàn bộ kết quả lọc</option>
+                </select>
+              </label>
             </div>
             <div className="table-actions">
               <button
@@ -648,6 +905,22 @@ export default function MailManagerPage() {
                 onClick={() => setPendingFillMissing(true)}
               >
                 {busyAction === "fill_missing" ? "Đang fill..." : "Fill missing OTP"}
+              </button>
+              <button
+                className="button secondary"
+                type="button"
+                disabled={!hasBatchCandidates || hasBusyAction}
+                onClick={() => void openBulkEdit()}
+              >
+                {busyAction === "batch_preview" ? "Đang preview..." : busyAction === "bulk_edit" ? "Đang sửa..." : "Bulk Edit"}
+              </button>
+              <button
+                className="button danger"
+                type="button"
+                disabled={!hasBatchCandidates || hasBusyAction}
+                onClick={() => void openBulkDelete()}
+              >
+                {busyAction === "batch_preview" ? "Đang preview..." : busyAction === "bulk_delete" ? "Đang xóa..." : "Bulk Delete"}
               </button>
               <button
                 className="button secondary"
@@ -688,6 +961,7 @@ export default function MailManagerPage() {
                       onChange={(event) => toggleSelectAllVisible(event.target.checked)}
                     />
                   </th>
+                  <th>Vị trí</th>
                   <th>Email</th>
                   <th>OTP</th>
                   <th>Status</th>
@@ -708,6 +982,9 @@ export default function MailManagerPage() {
                         checked={selectedGateIds.has(gate.id)}
                         onChange={(event) => toggleSelectOne(gate.id, event.target.checked)}
                       />
+                    </td>
+                    <td>
+                      <code className="mail-manager-position-cell">{gate.displayOrder || "-"}</code>
                     </td>
                     <td>
                       <div className="mail-manager-email-cell">
@@ -851,6 +1128,113 @@ export default function MailManagerPage() {
         </div>
       </div>
 
+      {pendingBulkEdit && (
+        <div className="modal-backdrop" onClick={() => !hasBusyAction && setPendingBulkEdit(null)}>
+          <form
+            className="modal mail-manager-bulk-edit-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="bulk-edit-dialog-title"
+            onClick={(event) => event.stopPropagation()}
+            onSubmit={confirmBulkEdit}
+          >
+            <h3 id="bulk-edit-dialog-title" className="section-title">
+              Bulk Edit {pendingBulkEdit.targetScope === "selected" ? "mail đã chọn" : "kết quả lọc"}
+            </h3>
+            <div className="mail-manager-batch-preview">
+              <strong>{pendingBulkEdit.preview.count.toLocaleString("vi-VN")} mail sẽ bị ảnh hưởng</strong>
+              <span>
+                {pendingBulkEdit.targetScope === "filtered"
+                  ? `Filter: ${pendingBulkEdit.preview.filter?.status || "all"}${pendingBulkEdit.preview.filter?.query ? ` · ${pendingBulkEdit.preview.filter.query}` : ""}`
+                  : `${pendingBulkEdit.preview.requestedCount.toLocaleString("vi-VN")} id đã chọn`}
+              </span>
+              {pendingBulkEdit.preview.emailsPreview.length > 0 && (
+                <code>{pendingBulkEdit.preview.emailsPreview.slice(0, 6).join(", ")}{pendingBulkEdit.preview.emailsPreview.length > 6 ? ", ..." : ""}</code>
+              )}
+            </div>
+
+            <div className="mail-manager-bulk-edit-grid">
+              <label className="form-group">
+                <span className="form-label">Trạng thái</span>
+                <select
+                  className="select"
+                  value={bulkEditDraft.activeMode}
+                  onChange={(event) => setBulkEditDraft((current) => ({
+                    ...current,
+                    activeMode: event.target.value as BulkEditDraft["activeMode"]
+                  }))}
+                >
+                  <option value="keep">Giữ nguyên</option>
+                  <option value="active">Active</option>
+                  <option value="inactive">Inactive</option>
+                </select>
+              </label>
+
+              <label className="form-group">
+                <span className="form-label">Ghi chú</span>
+                <select
+                  className="select"
+                  value={bulkEditDraft.noteMode}
+                  onChange={(event) => setBulkEditDraft((current) => ({
+                    ...current,
+                    noteMode: event.target.value as BulkEditDraft["noteMode"]
+                  }))}
+                >
+                  <option value="keep">Giữ nguyên</option>
+                  <option value="replace">Thay ghi chú</option>
+                  <option value="clear">Xóa ghi chú</option>
+                </select>
+              </label>
+
+              <label className="form-group mail-manager-bulk-edit-wide">
+                <span className="form-label">Nội dung ghi chú</span>
+                <textarea
+                  className="textarea"
+                  rows={3}
+                  value={bulkEditDraft.note}
+                  disabled={bulkEditDraft.noteMode !== "replace"}
+                  onChange={(event) => setBulkEditDraft((current) => ({ ...current, note: event.target.value }))}
+                />
+              </label>
+
+              <label className="form-group mail-manager-bulk-edit-wide">
+                <span className="form-label">OTP chung</span>
+                <div className="mail-manager-otp-row">
+                  <input
+                    className="input"
+                    autoComplete="one-time-code"
+                    placeholder="Để trống nếu giữ OTP hiện tại"
+                    value={bulkEditDraft.otp}
+                    onChange={(event) => setBulkEditDraft((current) => ({ ...current, otp: event.target.value }))}
+                  />
+                  <button
+                    className="button secondary"
+                    type="button"
+                    onClick={() => setBulkEditDraft((current) => ({ ...current, otp: createClientRandomOtp() }))}
+                  >
+                    Random
+                  </button>
+                </div>
+              </label>
+            </div>
+
+            <div className="modal-actions">
+              <button className="button" type="submit" disabled={busyAction === "bulk_edit" || !pendingBulkEdit.preview.count}>
+                {busyAction === "bulk_edit" ? "Đang xử lý..." : "Lưu Bulk Edit"}
+              </button>
+              <button
+                className="button secondary"
+                type="button"
+                disabled={busyAction === "bulk_edit"}
+                onClick={() => setPendingBulkEdit(null)}
+              >
+                Hủy
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       <ConfirmDialog
         open={Boolean(pendingDelete)}
         title="Xóa OTP gate?"
@@ -858,6 +1242,28 @@ export default function MailManagerPage() {
         confirmLabel="Xóa"
         onConfirm={deleteGate}
         onCancel={() => setPendingDelete(null)}
+      />
+
+      <ConfirmDialog
+        open={Boolean(pendingBulkDelete)}
+        title={pendingBulkDelete?.targetScope === "filtered" ? "Bulk Delete toàn bộ kết quả lọc?" : "Bulk Delete mail đã chọn?"}
+        description={pendingBulkDelete ? (
+          <div className="mail-manager-batch-preview">
+            <strong>{pendingBulkDelete.preview.count.toLocaleString("vi-VN")} mail sẽ bị xóa</strong>
+            <span>
+              {pendingBulkDelete.targetScope === "filtered"
+                ? `Filter: ${pendingBulkDelete.preview.filter?.status || "all"}${pendingBulkDelete.preview.filter?.query ? ` · ${pendingBulkDelete.preview.filter.query}` : ""}`
+                : `${pendingBulkDelete.preview.requestedCount.toLocaleString("vi-VN")} id đã chọn`}
+            </span>
+            {pendingBulkDelete.preview.emailsPreview.length > 0 && (
+              <code>{pendingBulkDelete.preview.emailsPreview.slice(0, 6).join(", ")}{pendingBulkDelete.preview.emailsPreview.length > 6 ? ", ..." : ""}</code>
+            )}
+          </div>
+        ) : undefined}
+        confirmLabel="Bulk Delete"
+        busy={busyAction === "bulk_delete"}
+        onConfirm={confirmBulkDelete}
+        onCancel={() => !hasBusyAction && setPendingBulkDelete(null)}
       />
 
       <ConfirmDialog

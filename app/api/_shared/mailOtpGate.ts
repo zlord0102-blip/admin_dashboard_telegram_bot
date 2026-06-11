@@ -4,6 +4,7 @@ export type MailOtpGateRow = {
   id: number;
   email: string | null;
   normalized_email: string | null;
+  display_order?: number | null;
   otp_plaintext?: string | null;
   otp_hash?: string | null;
   otp_salt?: string | null;
@@ -19,6 +20,7 @@ export type MailOtpGateRow = {
 
 export type MailOtpGatePublic = {
   id: number;
+  displayOrder: number;
   email: string;
   normalizedEmail: string;
   active: boolean;
@@ -113,6 +115,7 @@ export const verifyOtpSecret = (otp: string, salt: string | null | undefined, ex
 
 export const toMailOtpGatePublic = (row: MailOtpGateRow): MailOtpGatePublic => ({
   id: Number(row.id),
+  displayOrder: Number(row.display_order ?? 0),
   email: String(row.email || row.normalized_email || ""),
   normalizedEmail: String(row.normalized_email || ""),
   active: row.active !== false,

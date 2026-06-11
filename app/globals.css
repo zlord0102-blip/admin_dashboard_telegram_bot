@@ -2240,6 +2240,64 @@ tbody tr:focus-within .action-menu,
   font-size: 12px;
   color: #8a5b00;
 }
+.mail-manager-batch-scope {
+  display: inline-grid;
+  grid-template-columns: auto minmax(150px, 190px);
+  gap: 8px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+.mail-manager-batch-scope .select {
+  height: 34px;
+  min-height: 34px;
+  font-size: 12px;
+}
+.mail-manager-batch-preview {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(210,153,34,0.24);
+  background: rgba(210,153,34,0.08);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.mail-manager-batch-preview strong {
+  color: #8a5b00;
+  font-size: 13px;
+}
+.mail-manager-batch-preview code {
+  display: block;
+  max-width: 100%;
+  padding: 7px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.68);
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.mail-manager-bulk-edit-modal {
+  width: min(760px, 92vw);
+}
+.mail-manager-bulk-edit-summary {
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+}
+.mail-manager-bulk-edit-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 14px;
+  margin-top: 16px;
+}
+.mail-manager-bulk-edit-wide {
+  grid-column: 1 / -1;
+}
 .mail-manager-import-errors {
   display: grid;
   gap: 4px;
@@ -2283,6 +2341,20 @@ tbody tr:focus-within .action-menu,
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.mail-manager-position-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 48px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: rgba(31,35,40,0.04);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 800;
 }
 .mail-manager-metric {
   display: grid;
@@ -2498,12 +2570,15 @@ tbody tr:focus-within .action-menu,
   .form-split { grid-template-columns: 1fr; }
   .mail-manager-layout { grid-template-columns: 1fr; }
   .mail-manager-toolbar,
-  .mail-manager-otp-row { grid-template-columns: 1fr; }
+  .mail-manager-otp-row,
+  .mail-manager-bulk-edit-grid { grid-template-columns: 1fr; }
   .mail-manager-bulk-actions,
   .mail-manager-generated-actions { align-items: stretch; }
+  .mail-manager-batch-scope,
   .mail-manager-bulk-actions .table-actions,
   .mail-manager-generated-actions,
   .mail-manager-generated-actions .button { width: 100%; }
+  .mail-manager-batch-scope { grid-template-columns: 1fr; }
   .form-split .button { height: auto; }
 
   .broadcast-toolbar, .broadcast-title-compact, .license-section-head {
