@@ -27,6 +27,7 @@ const MAX_RANDOM_OTP_ROWS = 5000;
 const MAX_FILL_MISSING_OTP_ROWS = 5000;
 const MAX_BULK_EDIT_ROWS = 5000;
 const MAX_BULK_DELETE_ROWS = 5000;
+const MAX_RENUMBER_POSITION_ROWS = 5000;
 const MAX_IMPORT_ERRORS = 25;
 
 type AdminSessionSuccess = Exclude<Awaited<ReturnType<typeof requireAdminSession>>, { ok: false }>;
@@ -40,7 +41,7 @@ type GeneratedOtp = {
 
 type PreparedImport = {
   inputIndex: number;
-  displayOrder: number;
+  explicitDisplayOrder: number | null;
   normalizedEmail: string;
   otp: string;
   payload: Record<string, unknown>;
@@ -74,6 +75,18 @@ type BatchTargetResolution =
   | { ok: true; target: BatchGateTarget }
   | { ok: false; response: NextResponse };
 
+type RenumberPositionChange = {
+  row: MailOtpGateRow;
+  nextDisplayOrder: number;
+};
+
+type RenumberPositionPlan = {
+  rows: MailOtpGateRow[];
+  changes: RenumberPositionChange[];
+  totalRows: number;
+  limit: number;
+};
+
 const toPositiveId = (value: unknown) => {
   const parsed = Number.parseInt(String(value || ""), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
@@ -98,9 +111,10 @@ const getOtpValueFromPayload = (body: Record<string, unknown>) => {
 const getDisplayOrderValueFromPayload = (body: Record<string, unknown>) =>
   body.displayOrder ?? body.display_order ?? body.position ?? body.order ?? body.sort_order ?? body.index ?? body.stt ?? body.vi_tri;
 
-const normalizeDisplayOrder = (value: unknown, fallback: number) => {
+const parseDisplayOrderInput = (value: unknown) => {
+  if (String(value ?? "").trim() === "") return null;
   const parsed = Number.parseInt(String(value ?? "").trim(), 10);
-  if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+  if (!Number.isFinite(parsed) || parsed < 1) return null;
   return Math.min(parsed, MAX_DISPLAY_ORDER);
 };
 
@@ -205,6 +219,20 @@ const buildBatchPreview = (target: BatchGateTarget) => ({
   limit: target.limit,
   idsPreview: target.ids.slice(0, 100),
   emailsPreview: target.emails.slice(0, 20)
+});
+
+const buildRenumberPositionPreview = (plan: RenumberPositionPlan) => ({
+  operation: "renumber_positions",
+  scope: "all" as const,
+  count: plan.changes.length,
+  requestedCount: plan.totalRows,
+  totalRows: plan.totalRows,
+  limit: plan.limit,
+  idsPreview: plan.changes.slice(0, 100).map((change) => Number(change.row.id)),
+  emailsPreview: plan.changes
+    .slice(0, 20)
+    .map((change) => String(change.row.normalized_email || change.row.email || ""))
+    .filter(Boolean)
 });
 
 async function resolveBatchGateTarget({
@@ -366,6 +394,30 @@ async function getNextDisplayOrder(supabase: ReturnType<typeof getSupabaseAdminC
   return Math.min(current + 1, MAX_DISPLAY_ORDER);
 }
 
+async function getExistingDisplayOrders(
+  supabase: ReturnType<typeof getSupabaseAdminClient>,
+  normalizedEmails: string[]
+) {
+  const uniqueEmails = Array.from(new Set(normalizedEmails.filter(Boolean)));
+  const existingDisplayOrders = new Map<string, number>();
+  if (!uniqueEmails.length) return existingDisplayOrders;
+
+  const { data, error } = await supabase
+    .from("mail_otp_gates")
+    .select("normalized_email,display_order")
+    .in("normalized_email", uniqueEmails);
+
+  if (error) throw error;
+  ((data as Array<{ normalized_email?: string | null; display_order?: number | null }>) || []).forEach((row) => {
+    const normalizedEmail = String(row.normalized_email || "");
+    const displayOrder = Number(row.display_order || 0);
+    if (normalizedEmail && Number.isFinite(displayOrder) && displayOrder > 0) {
+      existingDisplayOrders.set(normalizedEmail, displayOrder);
+    }
+  });
+  return existingDisplayOrders;
+}
+
 async function getDisplayOrderForManualUpsert(
   supabase: ReturnType<typeof getSupabaseAdminClient>,
   normalizedEmail: string
@@ -380,6 +432,31 @@ async function getDisplayOrderForManualUpsert(
   const existingDisplayOrder = Number((data as { display_order?: number | null } | null)?.display_order ?? 0);
   if (Number.isFinite(existingDisplayOrder) && existingDisplayOrder > 0) return existingDisplayOrder;
   return getNextDisplayOrder(supabase);
+}
+
+async function getRenumberPositionPlan(
+  supabase: ReturnType<typeof getSupabaseAdminClient>,
+  maxRows = MAX_RENUMBER_POSITION_ROWS
+): Promise<RenumberPositionPlan> {
+  const { data, count, error } = await supabase
+    .from("mail_otp_gates")
+    .select(GATE_SELECT, { count: "exact" })
+    .order("display_order", { ascending: true })
+    .order("id", { ascending: true })
+    .limit(maxRows + 1);
+
+  if (error) throw error;
+  const rows = sortMailOtpGateRows((data as MailOtpGateRow[]) || []);
+  const totalRows = Number(count ?? rows.length);
+  if (totalRows > maxRows || rows.length > maxRows) {
+    throw new Error(`Renumber vị trí đang giới hạn ${maxRows.toLocaleString("vi-VN")} mail mỗi lần. Hiện có ${totalRows.toLocaleString("vi-VN")} mail.`);
+  }
+
+  const changes = rows
+    .map((row, index) => ({ row, nextDisplayOrder: index + 1 }))
+    .filter((change) => Number(change.row.display_order || 0) !== change.nextDisplayOrder);
+
+  return { rows, changes, totalRows, limit: maxRows };
 }
 
 async function handleGET(request: NextRequest) {
@@ -533,19 +610,21 @@ async function bulkImportGates(body: Record<string, unknown>, adminSession: Admi
 
     const active = normalizeActiveFlag(record.active ?? record.enabled ?? record.status, true);
     const note = normalizeNote(record.note ?? record.notes ?? record.memo ?? "");
-    const displayOrder = normalizeDisplayOrder(getDisplayOrderValueFromPayload(record), index + 1);
+    const explicitDisplayOrder = parseDisplayOrderInput(getDisplayOrderValueFromPayload(record));
     const secret = createOtpSecret(otp);
-    if (preparedByEmail.has(normalizedEmail)) duplicateCount += 1;
+    if (preparedByEmail.has(normalizedEmail)) {
+      duplicateCount += 1;
+      preparedByEmail.delete(normalizedEmail);
+    }
 
     preparedByEmail.set(normalizedEmail, {
       inputIndex: index + 1,
-      displayOrder,
+      explicitDisplayOrder,
       normalizedEmail,
       otp,
       payload: {
         email: normalizedEmail,
         normalized_email: normalizedEmail,
-        display_order: displayOrder,
         active,
         note,
         updated_by: adminSession.userId,
@@ -562,12 +641,40 @@ async function bulkImportGates(body: Record<string, unknown>, adminSession: Admi
   }
 
   const supabase = getSupabaseAdminClient();
+  const existingDisplayOrders = await getExistingDisplayOrders(
+    supabase,
+    prepared.map((item) => item.normalizedEmail)
+  );
+  const maxExplicitDisplayOrder = prepared.reduce(
+    (max, item) => Math.max(max, item.explicitDisplayOrder || 0),
+    0
+  );
+  let nextDisplayOrder = Math.max(await getNextDisplayOrder(supabase), Math.min(maxExplicitDisplayOrder + 1, MAX_DISPLAY_ORDER));
+  let explicitPositionCount = 0;
+  let preservedPositionCount = 0;
+  let appendedPositionCount = 0;
+  const payloads = prepared.map((item) => {
+    let displayOrder = item.explicitDisplayOrder;
+    if (displayOrder) {
+      explicitPositionCount += 1;
+    } else {
+      const existingDisplayOrder = existingDisplayOrders.get(item.normalizedEmail) || 0;
+      if (existingDisplayOrder > 0) {
+        displayOrder = existingDisplayOrder;
+        preservedPositionCount += 1;
+      } else {
+        displayOrder = nextDisplayOrder;
+        nextDisplayOrder = Math.min(nextDisplayOrder + 1, MAX_DISPLAY_ORDER);
+        appendedPositionCount += 1;
+      }
+    }
+
+    return { ...item.payload, display_order: displayOrder };
+  });
+
   const { data, error } = await supabase
     .from("mail_otp_gates")
-    .upsert(
-      prepared.map((item) => item.payload),
-      { onConflict: "normalized_email" }
-    )
+    .upsert(payloads, { onConflict: "normalized_email" })
     .select(GATE_SELECT);
 
   if (error) throw error;
@@ -588,7 +695,10 @@ async function bulkImportGates(body: Record<string, unknown>, adminSession: Admi
       duplicateCount,
       providedOtpCount,
       generatedOtpCount,
-      positionMode: "csv_position_or_row_order"
+      explicitPositionCount,
+      preservedPositionCount,
+      appendedPositionCount,
+      positionMode: "explicit_or_existing_or_append"
     }
   });
 
@@ -783,6 +893,15 @@ async function previewBatchTarget(body: Record<string, unknown>) {
     });
   }
 
+  if (operation === "renumber_positions") {
+    const supabase = getSupabaseAdminClient();
+    const plan = await getRenumberPositionPlan(supabase);
+    return NextResponse.json({
+      success: true,
+      data: { preview: buildRenumberPositionPreview(plan) }
+    });
+  }
+
   const supabase = getSupabaseAdminClient();
   const targetResult = await resolveBatchGateTarget({
     body,
@@ -906,6 +1025,59 @@ async function bulkDeleteGates(body: Record<string, unknown>, adminSession: Admi
     }
   });
 }
+
+async function renumberPositions(adminSession: AdminSessionSuccess) {
+  const supabase = getSupabaseAdminClient();
+  const plan = await getRenumberPositionPlan(supabase);
+  if (!plan.changes.length) {
+    return NextResponse.json({
+      success: true,
+      data: { gates: [], count: 0, totalCount: plan.totalRows, batch: buildRenumberPositionPreview(plan) }
+    });
+  }
+
+  const now = new Date().toISOString();
+  const payloads = plan.changes.map(({ row, nextDisplayOrder }) => {
+    const normalizedEmail = normalizeMailAddress(row.normalized_email || row.email || "");
+    return {
+      id: row.id,
+      email: row.email || normalizedEmail,
+      normalized_email: normalizedEmail,
+      display_order: nextDisplayOrder,
+      active: row.active !== false,
+      note: row.note || "",
+      otp_plaintext: row.otp_plaintext || null,
+      otp_hash: row.otp_hash,
+      otp_salt: row.otp_salt,
+      updated_by: adminSession.userId,
+      updated_at: now
+    };
+  });
+
+  const { data, error } = await supabase
+    .from("mail_otp_gates")
+    .upsert(payloads, { onConflict: "id" })
+    .select(GATE_SELECT);
+
+  if (error) throw error;
+
+  const gates = toSortedMailOtpGatePublics((data as MailOtpGateRow[]) || []);
+  await recordAdminAuditEvent(supabase, {
+    adminUserId: adminSession.userId,
+    adminEmail: adminSession.email,
+    action: "mail_otp_gate.renumber_positions",
+    entityType: "mail_otp_gate",
+    metadata: {
+      ...buildRenumberPositionPreview(plan),
+      updatedCount: gates.length
+    }
+  });
+
+  return NextResponse.json({
+    success: true,
+    data: { gates, count: gates.length, totalCount: plan.totalRows, batch: buildRenumberPositionPreview(plan) }
+  });
+}
 async function toggleGate(body: Record<string, unknown>, adminSession: AdminSessionSuccess) {
   const gateId = toPositiveId(body.gateId ?? body.id);
   if (!gateId) return NextResponse.json({ error: "gateId không hợp lệ." }, { status: 400 });
@@ -979,6 +1151,7 @@ async function handlePOST(request: NextRequest) {
     if (action === "fill_missing_otp") return await fillMissingOtp(body, adminSession);
     if (action === "bulk_edit") return await bulkEditGates(body, adminSession);
     if (action === "bulk_delete") return await bulkDeleteGates(body, adminSession);
+    if (action === "renumber_positions") return await renumberPositions(adminSession);
     if (action === "toggle_gate") return await toggleGate(body, adminSession);
     if (action === "delete_gate") return await deleteGate(body, adminSession);
     return NextResponse.json({ error: "Action không được hỗ trợ." }, { status: 400 });

@@ -76,6 +76,7 @@ type BatchPreview = {
   filter?: MailManagerFilterPayload;
   count: number;
   requestedCount: number;
+  totalRows?: number;
   limit: number;
   idsPreview: number[];
   emailsPreview: string[];
@@ -90,7 +91,7 @@ type PendingBatchAction = {
   preview: BatchPreview;
 };
 
-type BusyAction = "import" | "random" | "fill_missing" | "bulk_edit" | "bulk_delete" | "batch_preview";
+type BusyAction = "import" | "random" | "fill_missing" | "bulk_edit" | "bulk_delete" | "renumber_positions" | "batch_preview";
 
 type BulkEditResult = {
   gates: MailOtpGate[];
@@ -107,6 +108,13 @@ type BulkDeleteResult = {
   deletedGates: MailOtpGate[];
   count: number;
   requestedCount: number;
+  batch?: BatchPreview;
+};
+
+type RenumberPositionsResult = {
+  gates: MailOtpGate[];
+  count: number;
+  totalCount: number;
   batch?: BatchPreview;
 };
 
@@ -350,6 +358,7 @@ export default function MailManagerPage() {
   const [pendingFillMissing, setPendingFillMissing] = useState(false);
   const [pendingBulkEdit, setPendingBulkEdit] = useState<PendingBatchAction | null>(null);
   const [pendingBulkDelete, setPendingBulkDelete] = useState<PendingBatchAction | null>(null);
+  const [pendingRenumberPositions, setPendingRenumberPositions] = useState<BatchPreview | null>(null);
   const [bulkEditDraft, setBulkEditDraft] = useState<BulkEditDraft>(createEmptyBulkEditDraft);
   const [batchTargetScope, setBatchTargetScope] = useState<BatchTargetScope>("selected");
   const [selectedGateIds, setSelectedGateIds] = useState<Set<number>>(new Set());
@@ -580,6 +589,39 @@ export default function MailManagerPage() {
     return data.preview;
   };
 
+  const previewRenumberPositions = async () => {
+    const data = await adminApiRequest<BatchPreviewResult>("/api/admin/mail-manager", {
+      method: "POST",
+      body: JSON.stringify({ action: "preview_batch", operation: "renumber_positions" })
+    });
+    return data.preview;
+  };
+
+  const openRenumberPositions = async () => {
+    if (!gates.length) {
+      setStatus({ tone: "warning", text: "Chưa có mail để sửa vị trí." });
+      return;
+    }
+
+    setBusyAction("batch_preview");
+    try {
+      const preview = await previewRenumberPositions();
+      if (!preview.count) {
+        setStatus({ tone: "success", text: "Vị trí hiện tại đã liên tục, không có row cần sửa." });
+        return;
+      }
+      setPendingRenumberPositions(preview);
+      setStatus(null);
+    } catch (error) {
+      setStatus({
+        tone: "danger",
+        text: error instanceof Error ? error.message : "Không thể preview sửa vị trí."
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const openBulkEdit = async () => {
     if (!hasBatchCandidates) {
       setStatus({ tone: "warning", text: `Không có ${batchTargetLabel} để Bulk Edit.` });
@@ -751,6 +793,31 @@ export default function MailManagerPage() {
       "Không thể Bulk Delete mail."
     );
   };
+
+  const confirmRenumberPositions = async () => {
+    if (!pendingRenumberPositions) return;
+
+    await runBatchAction<RenumberPositionsResult>(
+      "renumber_positions",
+      () => adminApiRequest<RenumberPositionsResult>("/api/admin/mail-manager", {
+        method: "POST",
+        body: JSON.stringify({ action: "renumber_positions" })
+      }),
+      async (data) => {
+        setGeneratedOtps([]);
+        downloadGateBatchCsv(data.gates || [], "mail-manager-renumber-positions-affected");
+        await loadGates(true);
+        setPendingRenumberPositions(null);
+        setStatus({
+          tone: "success",
+          text: data.count
+            ? `Đã sửa vị trí cho ${data.count.toLocaleString("vi-VN")} mail và đã xuất CSV affected rows.`
+            : "Vị trí hiện tại đã đúng, không có row cần sửa."
+        });
+      },
+      "Không thể sửa vị trí mail."
+    );
+  };
   const handleImportCsv = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -777,7 +844,7 @@ export default function MailManagerPage() {
       await loadGates(true);
       setStatus({
         tone: mergedErrors.length ? "warning" : "success",
-        text: `Đã import ${data.importedCount.toLocaleString("vi-VN")}/${data.requestedCount.toLocaleString("vi-VN")} dòng và giữ vị trí CSV. ${data.generatedOtpCount.toLocaleString("vi-VN")} OTP được random, ${data.providedOtpCount.toLocaleString("vi-VN")} OTP lấy từ CSV.`
+        text: `Đã import ${data.importedCount.toLocaleString("vi-VN")}/${data.requestedCount.toLocaleString("vi-VN")} dòng và xử lý vị trí. ${data.generatedOtpCount.toLocaleString("vi-VN")} OTP được random, ${data.providedOtpCount.toLocaleString("vi-VN")} OTP lấy từ CSV.`
       });
     } catch (error) {
       setStatus({
@@ -905,6 +972,14 @@ export default function MailManagerPage() {
                 onClick={() => setPendingFillMissing(true)}
               >
                 {busyAction === "fill_missing" ? "Đang fill..." : "Fill missing OTP"}
+              </button>
+              <button
+                className="button secondary"
+                type="button"
+                disabled={!gates.length || hasBusyAction}
+                onClick={() => void openRenumberPositions()}
+              >
+                {busyAction === "batch_preview" ? "Đang preview..." : busyAction === "renumber_positions" ? "Đang sửa..." : "Sửa vị trí"}
               </button>
               <button
                 className="button secondary"
@@ -1275,6 +1350,27 @@ export default function MailManagerPage() {
         busy={busyAction === "fill_missing"}
         onConfirm={confirmFillMissingOtp}
         onCancel={() => !hasBusyAction && setPendingFillMissing(false)}
+      />
+
+      <ConfirmDialog
+        open={Boolean(pendingRenumberPositions)}
+        title="Sửa lại vị trí mail?"
+        description={pendingRenumberPositions ? (
+          <div className="mail-manager-batch-preview">
+            <strong>{pendingRenumberPositions.count.toLocaleString("vi-VN")} mail sẽ được cập nhật vị trí</strong>
+            <span>
+              Toàn bộ {Number(pendingRenumberPositions.totalRows || pendingRenumberPositions.requestedCount).toLocaleString("vi-VN")} mail sẽ được quét theo thứ tự hiện tại rồi đánh lại vị trí liên tục từ 1.
+            </span>
+            {pendingRenumberPositions.emailsPreview.length > 0 && (
+              <code>{pendingRenumberPositions.emailsPreview.slice(0, 6).join(", ")}{pendingRenumberPositions.emailsPreview.length > 6 ? ", ..." : ""}</code>
+            )}
+          </div>
+        ) : undefined}
+        confirmLabel="Sửa vị trí"
+        tone="primary"
+        busy={busyAction === "renumber_positions"}
+        onConfirm={confirmRenumberPositions}
+        onCancel={() => !hasBusyAction && setPendingRenumberPositions(null)}
       />
 
       <ConfirmDialog
